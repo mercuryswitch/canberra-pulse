@@ -9,6 +9,7 @@ interface ShapesSnapshot {
   generatedAt: string;
   tripToShape: Record<string, string>;
   shapes: Record<string, [number, number][]>;
+  tripHeadsign: Record<string, string>;
 }
 
 export interface ShapePoint {
@@ -52,6 +53,17 @@ function loadSnapshot(): Promise<ShapesSnapshot | null> {
 /** Preload the snapshot - call once at app startup so later lookups are synchronous-feeling. */
 export function preloadShapes(): Promise<void> {
   return loadSnapshot().then(() => undefined);
+}
+
+/** A trip's destination/direction text (e.g. "City West"), or null if unmatched/unavailable. */
+export async function getHeadsignForTrip(tripId: string): Promise<string | null> {
+  const snap = await loadSnapshot();
+  return snap?.tripHeadsign[tripId] ?? null;
+}
+
+/** First point of a trip's route shape - a reasonable proxy for "where this route starts". */
+export function shapeOrigin(shape: ShapePoint[]): { lat: number; lon: number } | null {
+  return shape.length > 0 ? { lat: shape[0].lat, lon: shape[0].lon } : null;
 }
 
 /** Resolve a trip's route shape (with cumulative distances precomputed), or null if unmatched/unavailable. */

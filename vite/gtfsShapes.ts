@@ -25,6 +25,8 @@ export interface ShapesSnapshot {
   tripToShape: Record<string, string>;
   /** shape_id -> ordered [lat, lon] points */
   shapes: Record<string, [number, number][]>;
+  /** trip_id -> trip_headsign (destination, e.g. "City West") - for route direction labels. */
+  tripHeadsign: Record<string, string>;
 }
 
 /** Resolve TC_GTFS_CLIENT_ID/SECRET from env or the app-local .env / .env.local files. */
@@ -92,7 +94,7 @@ function* csvRows(text: string): Generator<string[]> {
 }
 
 function columnIndex(header: string[], name: string): number {
-  const idx = header.findIndex((h) => h.replace(/^﻿/, '').trim() === name);
+  const idx = header.findIndex((h) => h.replace(/^\uFEFF/, '').trim() === name);
   if (idx === -1) throw new Error(`Column "${name}" not found in header: ${header.join(',')}`);
   return idx;
 }
@@ -107,13 +109,22 @@ export async function buildShapesSnapshot(rootDir: string): Promise<ShapesSnapsh
   const decoder = new TextDecoder();
 
   const tripToShape: Record<string, string> = {};
+  const tripHeadsign: Record<string, string> = {};
   {
     const rows = csvRows(decoder.decode(unzipped['trips.txt']));
     const header = rows.next().value as string[];
     const iTrip = columnIndex(header, 'trip_id');
     const iShape = columnIndex(header, 'shape_id');
+    // trip_headsign is optional per the GTFS spec - not every feed has it.
+    let iHeadsign = -1;
+    try {
+      iHeadsign = columnIndex(header, 'trip_headsign');
+    } catch {
+      // no headsign column - tripHeadsign stays empty, callers fall back gracefully.
+    }
     for (const r of rows) {
       if (r[iTrip] && r[iShape]) tripToShape[r[iTrip]] = r[iShape];
+      if (r[iTrip] && iHeadsign >= 0 && r[iHeadsign]) tripHeadsign[r[iTrip]] = r[iHeadsign];
     }
   }
 
@@ -142,5 +153,5 @@ export async function buildShapesSnapshot(rootDir: string): Promise<ShapesSnapsh
     shapes[shapeId] = points.map((p) => [p.lat, p.lon]);
   }
 
-  return { generatedAt: new Date().toISOString(), tripToShape, shapes };
+  return { generatedAt: new Date().toISOString(), tripToShape, shapes, tripHeadsign };
 }

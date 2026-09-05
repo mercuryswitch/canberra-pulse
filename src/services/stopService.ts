@@ -97,6 +97,28 @@ function isServiceActiveToday(
   return active;
 }
 
+/**
+ * Nearest stop's name to an arbitrary (lat, lon) - a human-readable "where is
+ * this" for a vehicle's current position or a route's origin, e.g. "Dickson
+ * Interchange". Pure geometry, no service-day filtering (unlike
+ * getNearestStops) since this isn't about what's scheduled, just what place
+ * name is closest.
+ */
+export async function getNearestStopName(lat: number, lon: number): Promise<string | null> {
+  const snap = await loadSnapshot();
+  if (!snap) return null;
+  let bestName: string | null = null;
+  let bestDist = Infinity;
+  for (const [, [stopLat, stopLon, name]] of Object.entries(snap.stops)) {
+    const d = haversineMeters(lat, lon, stopLat, stopLon);
+    if (d < bestDist) {
+      bestDist = d;
+      bestName = name;
+    }
+  }
+  return bestName;
+}
+
 /** Nearest `count` stops to (lat, lon), each with today's remaining scheduled arrivals per route. */
 export async function getNearestStops(lat: number, lon: number, count = 3): Promise<NearestStop[]> {
   const snap = await loadSnapshot();
