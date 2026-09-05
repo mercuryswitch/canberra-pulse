@@ -70,8 +70,11 @@ const VEHICLE_MODEL = { uri: '/models/bus.glb', scale: 1.15 };
 // The model's own authored "forward" axis doesn't line up with the axis
 // Cesium treats as heading-0-points-north, so every vehicle renders with the
 // same fixed rotational offset regardless of its (correct) real bearing.
-// Best guess at the correction below - flip the sign if it's backwards.
-const MODEL_HEADING_OFFSET_DEG = 90;
+// Was +90 (fixed the original "facing 90 degrees sideways" bug), but Ross
+// confirmed 2026-09-05 that reads as driving backwards - flipping the sign
+// is exactly a 180 degree change (90 - (-90) = 180), which is precisely
+// "backwards" vs "sideways", so this is the anticipated fix, not a guess.
+const MODEL_HEADING_OFFSET_DEG = -90;
 // Matches the actual model tint colors below, so the legend swatches are
 // accurate rather than an arbitrary separate palette.
 const TYPE_COLOR = { bus: '#FFA500', rail: '#CF1A2B' };
@@ -142,6 +145,7 @@ export function CesiumView() {
   const positionsRef = useRef<Map<string, SampledPositionProperty>>(new Map());
   const orientationsRef = useRef<Map<string, SampledProperty>>(new Map());
   const lastSampleTsRef = useRef<Map<string, number>>(new Map());
+  const lastTripIdRef = useRef<Map<string, string>>(new Map());
   const busDataRef = useRef<Map<string, BusPosition>>(new Map());
   const [needsConnect, setNeedsConnect] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -568,6 +572,32 @@ export function CesiumView() {
           busDataRef.current.set(bus.id, bus);
           const sampleTime = JulianDate.fromDate(new Date(bus.ts));
 
+          // A trip_id change means a genuinely different journey (the
+          // vehicle finished one trip and started another, often on a
+          // different shape entirely - e.g. light rail's outbound vs return
+          // shape) - not a continuation of the same route. Cesium's
+          // SampledPositionProperty only knows about straight-line Cartesian
+          // interpolation/extrapolation between the raw samples it's given;
+          // it has no idea two consecutive samples belong to different
+          // trips. Left unhandled, the big real-world jump between "end of
+          // trip A's shape" and "start of trip B's shape" gets treated as a
+          // huge implied velocity, and EXTRAPOLATE (see below) then draws a
+          // straight line from that velocity for up to 5 minutes - visually
+          // a vehicle flying far off both shapes before the next real fix
+          // corrects it. Root-caused 2026-09-05 (Ross: "trains showing 1km
+          // off route") - light rail hits this far more than buses since it
+          // updates much less often, so there's more real-world distance
+          // between "last sample of trip A" and "first sample of trip B".
+          // Fix: wipe this vehicle's position/orientation history outright
+          // on a trip change, so the new trip starts a clean SampledProperty
+          // with nothing to extrapolate from until its own second sample.
+          if (lastTripIdRef.current.get(bus.id) !== bus.tripId) {
+            positionsRef.current.delete(bus.id);
+            orientationsRef.current.delete(bus.id);
+            lastSampleTsRef.current.delete(bus.id);
+            lastTripIdRef.current.set(bus.id, bus.tripId);
+          }
+
           // A SampledPositionProperty holds real fixes over time and, with
           // extrapolation on, keeps moving the entity along the last known
           // velocity between polls instead of snapping every 8s. The moment
@@ -693,6 +723,7 @@ export function CesiumView() {
             positionsRef.current.delete(id);
             orientationsRef.current.delete(id);
             lastSampleTsRef.current.delete(id);
+            lastTripIdRef.current.delete(id);
           }
         }
       } catch (err) {
