@@ -17,6 +17,7 @@ import {
   Math as CesiumMath,
   OpenStreetMapImageryProvider,
   Quaternion,
+  Rectangle,
   SampledPositionProperty,
   SampledProperty,
   Terrain,
@@ -27,11 +28,19 @@ import {
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { type BusPosition, fetchBuses } from '@/services/busService';
+import {
+  type BusPosition,
+  fetchBuses,
+  fetchHeatmapGrid,
+  HEATMAP_GRID_DEGREES,
+  type HeatmapCell,
+} from '@/services/busService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
 import {
   getHeadsignForTrip,
+  getShapeById,
   getShapeForTrip,
+  getShapeIdForTrip,
   haversineMeters,
   preloadShapes,
   shapeOrigin,
@@ -114,9 +123,13 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
     ['Position', `${bus.lat.toFixed(5)}, ${bus.lon.toFixed(5)}`],
     ['Last update', new Date(bus.ts).toLocaleTimeString()],
   ];
+  // A bottom bar rather than a tall left-side panel (2026-09-05, Ross's
+  // ask) - the left side is where the Bus/Rail/Routes/etc. lists live, and
+  // the old top-20/bottom-4 panel was covering them whenever a vehicle from
+  // one of those lists was selected.
   return (
-    <div className="absolute left-4 top-20 bottom-4 z-30 w-72 rounded-2xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden flex flex-col">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+    <div className="absolute left-4 right-4 bottom-4 z-30 rounded-2xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2 border-b border-white/10">
         <span className="font-medium text-sm">Vehicle {bus.id}</span>
         <button
           onClick={onClose}
@@ -126,7 +139,7 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
           &times;
         </button>
       </div>
-      <div className="p-4 flex flex-col gap-3">
+      <div className="px-4 py-3 flex flex-wrap gap-x-8 gap-y-2">
         {rows.map(([label, value]) => (
           <div key={label}>
             <div className="text-[11px] uppercase tracking-wide text-white/40">{label}</div>
@@ -146,6 +159,13 @@ export function CesiumView() {
   const orientationsRef = useRef<Map<string, SampledProperty>>(new Map());
   const lastSampleTsRef = useRef<Map<string, number>>(new Map());
   const lastTripIdRef = useRef<Map<string, string>>(new Map());
+  // #3 bus bunching (2026-09-05): each vehicle's position along its own
+  // shape, kept only for vehicles that successfully map-matched (bunching
+  // comparisons need "same physical route+direction", which shape_id
+  // captures exactly - route_id alone can span multiple directions/patterns).
+  const vehicleProgressRef = useRef<Map<string, { shapeId: string; distanceAlong: number; routeId: string }>>(
+    new Map(),
+  );
   const busDataRef = useRef<Map<string, BusPosition>>(new Map());
   const [needsConnect, setNeedsConnect] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -271,6 +291,15 @@ export function CesiumView() {
   // rule as everything else here.
   const [routeFilter, setRouteFilter] = useState<string | null>(null);
   const [showRoutesList, setShowRoutesList] = useState(false);
+  const [showBunching, setShowBunching] = useState(false);
+  // #1 service coverage heat map (2026-09-05): fetched once per toggle-open,
+  // not on every poll - it's a 24h history aggregate, not a live view, so
+  // there's nothing meaningful to refresh every 8s.
+  const [showHeatmap, setShowHeatmap] = useState(false);
+  const [heatmapCells, setHeatmapCells] = useState<HeatmapCell[]>([]);
+  const [heatmapLoading, setHeatmapLoading] = useState(false);
+  const heatmapEntitiesRef = useRef<Entity[]>([]);
+  const routeLineEntitiesRef = useRef<Entity[]>([]);
   const allRoutes = useMemo(() => {
     const routes = new Set<string>();
     for (const bus of busDataRef.current.values()) routes.add(bus.routeId);
@@ -278,6 +307,169 @@ export function CesiumView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
+
+  // #3 bus bunching (2026-09-05): two vehicles on the exact same shape (same
+  // route, same direction) closer together along the route than they'd
+  // realistically be if evenly spread - a classic under-resourcing/recovery-
+  // time signal. MVP version: real headway only, no comparison against
+  // scheduled headway (that needs the same per-trip schedule work #2 does -
+  // a reasonable follow-up once #2's snapshot exists, not built yet).
+  const BUNCHING_THRESHOLD_METERS = 400;
+  const bunchingAlerts = useMemo(() => {
+    const byShape = new Map<string, { vehicleId: string; distanceAlong: number; routeId: string }[]>();
+    for (const [vehicleId, p] of vehicleProgressRef.current) {
+      let group = byShape.get(p.shapeId);
+      if (!group) {
+        group = [];
+        byShape.set(p.shapeId, group);
+      }
+      group.push({ vehicleId, ...p });
+    }
+    const alerts: { routeId: string; vehicleA: string; vehicleB: string; gapMeters: number }[] = [];
+    for (const group of byShape.values()) {
+      if (group.length < 2) continue;
+      group.sort((a, b) => a.distanceAlong - b.distanceAlong);
+      for (let i = 0; i < group.length - 1; i++) {
+        const gap = group[i + 1].distanceAlong - group[i].distanceAlong;
+        if (gap <= BUNCHING_THRESHOLD_METERS) {
+          alerts.push({
+            routeId: group[i].routeId,
+            vehicleA: group[i].vehicleId,
+            vehicleB: group[i + 1].vehicleId,
+            gapMeters: gap,
+          });
+        }
+      }
+    }
+    return alerts.sort((a, b) => a.gapMeters - b.gapMeters);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- vehicleProgressRef
+    // is a ref; pollTick is the actual trigger for recomputing this each poll.
+  }, [pollTick]);
+
+  // Fetch the heat map grid once per toggle-open (not on every poll - see
+  // the state comment above for why).
+  useEffect(() => {
+    if (!showHeatmap) return;
+    let cancelled = false;
+    setHeatmapLoading(true);
+    const controller = new AbortController();
+    void fetchHeatmapGrid(controller.signal)
+      .then((cells) => {
+        if (!cancelled) setHeatmapCells(cells);
+      })
+      .catch(() => {
+        if (!cancelled) setHeatmapCells([]);
+      })
+      .finally(() => {
+        if (!cancelled) setHeatmapLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [showHeatmap]);
+
+  // Draw the grid as translucent colored rectangles, one per cell, tinted
+  // from the coolest to the hottest cell in the *current* dataset (not a
+  // fixed absolute scale - with only ~2 weeks of history so far, an
+  // absolute scale would need constant recalibration as more data lands).
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    for (const entity of heatmapEntitiesRef.current) viewer.entities.remove(entity);
+    heatmapEntitiesRef.current = [];
+    if (!showHeatmap || heatmapCells.length === 0) return;
+    const maxCount = Math.max(...heatmapCells.map((c) => c.count));
+    heatmapEntitiesRef.current = heatmapCells.map((cell) => {
+      const intensity = maxCount > 0 ? cell.count / maxCount : 0;
+      const color = Color.lerp(
+        Color.fromCssColorString('#FFF59D'), // coolest cell - pale yellow
+        Color.fromCssColorString('#D32F2F'), // hottest cell - deep red
+        intensity,
+        new Color(),
+      ).withAlpha(0.15 + 0.55 * intensity);
+      return viewer.entities.add({
+        rectangle: {
+          coordinates: Rectangle.fromDegrees(
+            cell.lonBin,
+            cell.latBin,
+            cell.lonBin + HEATMAP_GRID_DEGREES,
+            cell.latBin + HEATMAP_GRID_DEGREES,
+          ),
+          material: color,
+          height: 0,
+          heightReference: HeightReference.CLAMP_TO_GROUND,
+        },
+      });
+    });
+    return () => {
+      for (const entity of heatmapEntitiesRef.current) viewer.entities.remove(entity);
+      heatmapEntitiesRef.current = [];
+    };
+  }, [showHeatmap, heatmapCells]);
+
+  // Draw the actual route line(s) as a visible overlay (2026-09-05, Ross's
+  // ask) - a direct visual answer to "are vehicles actually locked to their
+  // route", using the exact same shape data already used for map-matching,
+  // not a separate/approximate line. Two triggers: selecting a single
+  // vehicle draws just that vehicle's own shape; selecting a route via the
+  // Routes navigator draws every distinct shape currently in use by that
+  // route's active vehicles (a route_id can have more than one - different
+  // directions are different shapes).
+  useEffect(() => {
+    if (!viewerRef.current) return;
+    let cancelled = false;
+
+    async function draw() {
+      const viewer = viewerRef.current;
+      if (!viewer) return;
+      const shapeIds = new Set<string>();
+      if (routeFilter) {
+        for (const p of vehicleProgressRef.current.values()) {
+          if (p.routeId === routeFilter) shapeIds.add(p.shapeId);
+        }
+      } else if (selectedBus) {
+        const shapeId = await getShapeIdForTrip(selectedBus.tripId);
+        if (shapeId) shapeIds.add(shapeId);
+      }
+
+      const shapes = await Promise.all(
+        Array.from(shapeIds).map(async (shapeId) => ({
+          shapeId,
+          points: await getShapeById(shapeId),
+        })),
+      );
+      if (cancelled) return;
+
+      for (const entity of routeLineEntitiesRef.current) viewer.entities.remove(entity);
+      routeLineEntitiesRef.current = shapes
+        .filter((s): s is { shapeId: string; points: NonNullable<typeof s.points> } => !!s.points)
+        .map((s) =>
+          viewer.entities.add({
+            polyline: {
+              positions: Cartesian3.fromDegreesArray(
+                s.points.flatMap((p) => [p.lon, p.lat]),
+              ),
+              width: 4,
+              material: Color.CYAN.withAlpha(0.65),
+              clampToGround: true,
+            },
+          }),
+        );
+    }
+
+    void draw();
+    return () => {
+      cancelled = true;
+      if (viewerRef.current) {
+        for (const entity of routeLineEntitiesRef.current) viewerRef.current.entities.remove(entity);
+      }
+      routeLineEntitiesRef.current = [];
+    };
+    // vehicleProgressRef is a ref (no lint complaint about it as a missing
+    // dep); pollTick keeps the route-filter case's shape set current as
+    // vehicles come and go.
+  }, [routeFilter, selectedBus, pollTick]);
 
   // The poll loop below has an empty dependency array (it's a long-lived
   // interval, not something to restart on every filter click), so it reads
@@ -661,6 +853,16 @@ export function CesiumView() {
               const snapped = snapToShape(shape, bus.lat, bus.lon);
               lat = snapped.lat;
               lon = snapped.lon;
+              const shapeId = await getShapeIdForTrip(bus.tripId);
+              if (shapeId) {
+                vehicleProgressRef.current.set(bus.id, {
+                  shapeId,
+                  distanceAlong: snapped.distanceAlong,
+                  routeId: bus.routeId,
+                });
+              }
+            } else {
+              vehicleProgressRef.current.delete(bus.id);
             }
             const position = Cartesian3.fromDegrees(lon, lat);
 
@@ -724,6 +926,7 @@ export function CesiumView() {
             orientationsRef.current.delete(id);
             lastSampleTsRef.current.delete(id);
             lastTripIdRef.current.delete(id);
+            vehicleProgressRef.current.delete(id);
           }
         }
       } catch (err) {
@@ -754,6 +957,8 @@ export function CesiumView() {
             if (nearMeActive) toggleNearMe();
             setShowRoutesList(false);
             setRouteFilter(null);
+            setShowBunching(false);
+            setShowHeatmap(false);
             setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -771,6 +976,8 @@ export function CesiumView() {
             if (nearMeActive) toggleNearMe();
             setShowRoutesList(false);
             setRouteFilter(null);
+            setShowBunching(false);
+            setShowHeatmap(false);
             setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -787,6 +994,8 @@ export function CesiumView() {
           onClick={() => {
             setShowRoutesList(false);
             setRouteFilter(null);
+            setShowBunching(false);
+            setShowHeatmap(false);
             toggleNearMe();
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -804,6 +1013,8 @@ export function CesiumView() {
               return;
             }
             if (nearMeActive) toggleNearMe();
+            setShowBunching(false);
+            setShowHeatmap(false);
             setFilterType('all');
             setShowRoutesList(true);
           }}
@@ -814,7 +1025,56 @@ export function CesiumView() {
           <span aria-hidden>🛣️</span>
           Routes
         </button>
+        <button
+          onClick={() => {
+            if (showBunching) {
+              setShowBunching(false);
+              return;
+            }
+            if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
+            setShowHeatmap(false);
+            setFilterType('all');
+            setShowBunching(true);
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
+            showBunching ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+          } ${bunchingAlerts.length > 0 && !showBunching ? 'text-amber-600' : ''}`}
+        >
+          <span aria-hidden>⚠️</span>
+          {bunchingAlerts.length > 0 ? `${bunchingAlerts.length} Bunched` : 'Bunching'}
+        </button>
+        <button
+          onClick={() => {
+            if (showHeatmap) {
+              setShowHeatmap(false);
+              return;
+            }
+            if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
+            setShowBunching(false);
+            setFilterType('all');
+            setShowHeatmap(true);
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
+            showHeatmap ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+          }`}
+        >
+          <span aria-hidden>🔥</span>
+          {heatmapLoading ? 'Loading…' : 'Heat map'}
+        </button>
       </div>
+      {showHeatmap && (
+        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex items-center gap-2">
+          <span className="text-gray-500">Last 24h ping density:</span>
+          <span className="inline-block w-16 h-3 rounded" style={{
+            background: 'linear-gradient(to right, #FFF59D, #D32F2F)',
+          }} />
+          <span className="text-gray-400">low → high</span>
+        </div>
+      )}
       {nearMeActive && (
         <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
           {userLocation && nearestStops.length > 0 && (
@@ -1001,6 +1261,39 @@ export function CesiumView() {
                 }`}
               >
                 <span className="font-medium">Route {routeId}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      {/* #3 bus bunching (2026-09-05): vehicles on the exact same shape
+          (route + direction) closer together than BUNCHING_THRESHOLD_METERS.
+          Real headway only for now - no comparison against scheduled
+          headway yet, see the comment on bunchingAlerts above. */}
+      {showBunching && (
+        <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          {bunchingAlerts.length === 0 ? (
+            <div className="px-3 py-2 text-gray-400">No bunching detected right now</div>
+          ) : (
+            bunchingAlerts.map((alert) => (
+              <button
+                key={`${alert.vehicleA}-${alert.vehicleB}`}
+                onClick={() => {
+                  const viewer = viewerRef.current;
+                  if (!viewer) return;
+                  const entities = [alert.vehicleA, alert.vehicleB]
+                    .map((id) => entitiesRef.current.get(id))
+                    .filter((e): e is Entity => !!e);
+                  if (entities.length > 0) void viewer.flyTo(entities);
+                }}
+                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+              >
+                <span className="font-medium text-gray-700">
+                  Route {alert.routeId}: {alert.vehicleA} &amp; {alert.vehicleB}
+                </span>
+                <span className="text-xs text-amber-600 font-medium shrink-0">
+                  {formatDistance(alert.gapMeters)} apart
+                </span>
               </button>
             ))
           )}

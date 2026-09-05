@@ -61,17 +61,26 @@ export async function getHeadsignForTrip(tripId: string): Promise<string | null>
   return snap?.tripHeadsign[tripId] ?? null;
 }
 
+/**
+ * A trip's shape_id, or null if unmatched. Two trips sharing a shape_id are
+ * the same physical route+direction - used for bunching detection, where
+ * "same route, same direction" needs to be exact, not just same route_id
+ * (a route_id can have multiple directions/patterns, each its own shape).
+ */
+export async function getShapeIdForTrip(tripId: string): Promise<string | null> {
+  const snap = await loadSnapshot();
+  return snap?.tripToShape[tripId] ?? null;
+}
+
 /** First point of a trip's route shape - a reasonable proxy for "where this route starts". */
 export function shapeOrigin(shape: ShapePoint[]): { lat: number; lon: number } | null {
   return shape.length > 0 ? { lat: shape[0].lat, lon: shape[0].lon } : null;
 }
 
-/** Resolve a trip's route shape (with cumulative distances precomputed), or null if unmatched/unavailable. */
-export async function getShapeForTrip(tripId: string): Promise<ShapePoint[] | null> {
+/** Resolve a shape_id directly to its points (with cumulative distances precomputed). */
+export async function getShapeById(shapeId: string): Promise<ShapePoint[] | null> {
   const snap = await loadSnapshot();
   if (!snap) return null;
-  const shapeId = snap.tripToShape[tripId];
-  if (!shapeId) return null;
 
   const cached = shapeCache.get(shapeId);
   if (cached) return cached;
@@ -91,6 +100,15 @@ export async function getShapeForTrip(tripId: string): Promise<ShapePoint[] | nu
   }
   shapeCache.set(shapeId, points);
   return points;
+}
+
+/** Resolve a trip's route shape (with cumulative distances precomputed), or null if unmatched/unavailable. */
+export async function getShapeForTrip(tripId: string): Promise<ShapePoint[] | null> {
+  const snap = await loadSnapshot();
+  if (!snap) return null;
+  const shapeId = snap.tripToShape[tripId];
+  if (!shapeId) return null;
+  return getShapeById(shapeId);
 }
 
 /**
