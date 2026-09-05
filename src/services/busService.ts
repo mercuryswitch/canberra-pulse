@@ -51,3 +51,48 @@ export async function fetchBuses(signal?: AbortSignal): Promise<BusFeed> {
   })).filter((b) => Number.isFinite(b.lat) && Number.isFinite(b.lon));
   return { asOf: new Date().toISOString(), buses };
 }
+
+/** One grid cell of the service-coverage heat map - see fetchHeatmapGrid. */
+export interface HeatmapCell {
+  latBin: number;
+  lonBin: number;
+  count: number;
+}
+
+// #1 service coverage heat map (2026-09-05): "which parts of Canberra
+// actually get frequent real service" - unlike busService's own live query,
+// this deliberately looks at HISTORY, not the 5-minute active window, since
+// Kusto retains every ingested row (busCount/railCount are the only reason
+// the app has otherwise only ever queried "now"). 24h is a pragmatic
+// default: recent enough to mean "today's actual service pattern", bounded
+// enough to keep the query fast as the table keeps growing. Grid size
+// (~0.005 degrees, roughly 500m at Canberra's latitude) is a resolution
+// choice, not a precise measurement - a raw ping count per cell is a proxy
+// for time-spent/frequency, not a true service-frequency metric (a vehicle
+// idling in one spot generates many pings without representing "frequent
+// service") - acceptable for a first pass, worth refining later if the
+// heat map ever needs to distinguish idling from throughput.
+const HEATMAP_WINDOW = '1d';
+/** Exported so the renderer draws cells the exact size the query actually binned. */
+export const HEATMAP_GRID_DEGREES = 0.005;
+
+const HEATMAP_KQL = `
+EventSchemaBUS_v1
+| extend ts = todatetime(timestamp)
+| where ts > now() - ${HEATMAP_WINDOW}
+| extend latBin = bin(latitude, ${HEATMAP_GRID_DEGREES}), lonBin = bin(longitude, ${HEATMAP_GRID_DEGREES})
+| summarize hits = count() by latBin, lonBin
+`;
+
+/** Grid-cell ping counts over the last 24h, for the service-coverage heat map. */
+export async function fetchHeatmapGrid(signal?: AbortSignal): Promise<HeatmapCell[]> {
+  const t = await queryKusto(HEATMAP_KQL, signal);
+  const iLat = colIndex(t, 'latBin');
+  const iLon = colIndex(t, 'lonBin');
+  const iHits = colIndex(t, 'hits');
+  return t.Rows.map((r) => ({
+    latBin: Number(r[iLat]),
+    lonBin: Number(r[iLon]),
+    count: Number(r[iHits]),
+  })).filter((c) => Number.isFinite(c.latBin) && Number.isFinite(c.lonBin));
+}
