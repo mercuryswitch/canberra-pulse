@@ -97,6 +97,13 @@ function isServiceActiveToday(
   return active;
 }
 
+/** Every stop's coordinates - used to show "underutilised" areas (a real stop nearby, low actual traffic) on the heat map, not just wherever a vehicle happened to ping. */
+export async function getAllStopCoordinates(): Promise<{ lat: number; lon: number }[]> {
+  const snap = await loadSnapshot();
+  if (!snap) return [];
+  return Object.values(snap.stops).map(([lat, lon]) => ({ lat, lon }));
+}
+
 /**
  * Nearest stop's name to an arbitrary (lat, lon) - a human-readable "where is
  * this" for a vehicle's current position or a route's origin, e.g. "Dickson

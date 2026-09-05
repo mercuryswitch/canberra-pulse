@@ -48,6 +48,7 @@ import {
 } from '@/services/shapeService';
 import {
   formatArrivalClock,
+  getAllStopCoordinates,
   getNearestStopName,
   getNearestStops,
   minutesUntil,
@@ -298,6 +299,11 @@ export function CesiumView() {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [heatmapCells, setHeatmapCells] = useState<HeatmapCell[]>([]);
   const [heatmapLoading, setHeatmapLoading] = useState(false);
+  // Exponent applied to each cell's relative intensity before colouring -
+  // see the rendering effect below for why this needs to be user-adjustable
+  // rather than a fixed constant. 1 = linear (the original, too-sensitive
+  // behaviour); higher values push more of the scale toward cold.
+  const [heatmapSensitivity, setHeatmapSensitivity] = useState(2);
   const heatmapEntitiesRef = useRef<Entity[]>([]);
   const routeLineEntitiesRef = useRef<Entity[]>([]);
   const allRoutes = useMemo(() => {
@@ -347,15 +353,31 @@ export function CesiumView() {
   }, [pollTick]);
 
   // Fetch the heat map grid once per toggle-open (not on every poll - see
-  // the state comment above for why).
+  // the state comment above for why). Unions in every known stop location,
+  // binned to the same grid, as a synthetic zero-count cell wherever the
+  // live-ping query didn't already cover it - this is what lets the map
+  // show "there's a stop here but barely anything actually stops" as a
+  // distinct cold cell, rather than that area just being blank (Ross's ask,
+  // 2026-09-05: "areas that are underutilised or not close to a bus stop").
+  // A location with no rectangle at all still means something too: no stop
+  // and no observed activity either.
   useEffect(() => {
     if (!showHeatmap) return;
     let cancelled = false;
     setHeatmapLoading(true);
     const controller = new AbortController();
-    void fetchHeatmapGrid(controller.signal)
-      .then((cells) => {
-        if (!cancelled) setHeatmapCells(cells);
+    void Promise.all([fetchHeatmapGrid(controller.signal), getAllStopCoordinates()])
+      .then(([pingCells, stops]) => {
+        if (cancelled) return;
+        const byBin = new Map<string, HeatmapCell>();
+        for (const cell of pingCells) byBin.set(`${cell.latBin}|${cell.lonBin}`, cell);
+        for (const stop of stops) {
+          const latBin = Math.floor(stop.lat / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
+          const lonBin = Math.floor(stop.lon / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
+          const key = `${latBin}|${lonBin}`;
+          if (!byBin.has(key)) byBin.set(key, { latBin, lonBin, count: 0 });
+        }
+        setHeatmapCells(Array.from(byBin.values()));
       })
       .catch(() => {
         if (!cancelled) setHeatmapCells([]);
@@ -369,10 +391,33 @@ export function CesiumView() {
     };
   }, [showHeatmap]);
 
-  // Draw the grid as translucent colored rectangles, one per cell, tinted
-  // from the coolest to the hottest cell in the *current* dataset (not a
-  // fixed absolute scale - with only ~2 weeks of history so far, an
-  // absolute scale would need constant recalibration as more data lands).
+  // Draw the grid as translucent colored rectangles: blue (cold - a stop
+  // exists here but little/no observed activity) through yellow to red
+  // (hot - genuinely high traffic), scaled against the hottest cell in the
+  // *current* dataset (not a fixed absolute scale - with only ~2 weeks of
+  // history so far, an absolute scale would need constant recalibration as
+  // more data lands). `heatmapSensitivity` (a user-adjustable slider,
+  // 2026-09-05 - Ross's ask, replacing a fixed linear scale that made
+  // moderate cells look misleadingly "hot") is an exponent applied to the
+  // 0-1 relative intensity before mapping to color: >1 compresses low/mid
+  // values toward cold and reserves red for only the genuinely highest
+  // cells ("ultra-high" per Ross), 1 is the original linear behaviour.
+  function heatColor(intensity: number): Color {
+    if (intensity <= 0.5) {
+      return Color.lerp(
+        Color.fromCssColorString('#2979FF'),
+        Color.fromCssColorString('#FFF59D'),
+        intensity * 2,
+        new Color(),
+      );
+    }
+    return Color.lerp(
+      Color.fromCssColorString('#FFF59D'),
+      Color.fromCssColorString('#D32F2F'),
+      (intensity - 0.5) * 2,
+      new Color(),
+    );
+  }
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
@@ -381,13 +426,9 @@ export function CesiumView() {
     if (!showHeatmap || heatmapCells.length === 0) return;
     const maxCount = Math.max(...heatmapCells.map((c) => c.count));
     heatmapEntitiesRef.current = heatmapCells.map((cell) => {
-      const intensity = maxCount > 0 ? cell.count / maxCount : 0;
-      const color = Color.lerp(
-        Color.fromCssColorString('#FFF59D'), // coolest cell - pale yellow
-        Color.fromCssColorString('#D32F2F'), // hottest cell - deep red
-        intensity,
-        new Color(),
-      ).withAlpha(0.15 + 0.55 * intensity);
+      const raw = maxCount > 0 ? cell.count / maxCount : 0;
+      const intensity = Math.pow(raw, heatmapSensitivity);
+      const color = heatColor(intensity).withAlpha(0.15 + 0.55 * intensity);
       return viewer.entities.add({
         rectangle: {
           coordinates: Rectangle.fromDegrees(
@@ -406,7 +447,7 @@ export function CesiumView() {
       for (const entity of heatmapEntitiesRef.current) viewer.entities.remove(entity);
       heatmapEntitiesRef.current = [];
     };
-  }, [showHeatmap, heatmapCells]);
+  }, [showHeatmap, heatmapCells, heatmapSensitivity]);
 
   // Draw the actual route line(s) as a visible overlay (2026-09-05, Ross's
   // ask) - a direct visual answer to "are vehicles actually locked to their
@@ -1067,12 +1108,31 @@ export function CesiumView() {
         </button>
       </div>
       {showHeatmap && (
-        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex items-center gap-2">
-          <span className="text-gray-500">Last 24h ping density:</span>
-          <span className="inline-block w-16 h-3 rounded" style={{
-            background: 'linear-gradient(to right, #FFF59D, #D32F2F)',
-          }} />
-          <span className="text-gray-400">low → high</span>
+        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-64">
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500 shrink-0">Last 24h ping density:</span>
+            <span
+              className="inline-block flex-1 h-3 rounded"
+              style={{ background: 'linear-gradient(to right, #2979FF, #FFF59D, #D32F2F)' }}
+            />
+          </div>
+          <div className="flex justify-between text-gray-400">
+            <span>no stop nearby / underutilised</span>
+            <span>ultra-high</span>
+          </div>
+          <div className="flex items-center gap-2 pt-1 border-t border-gray-100">
+            <span className="text-gray-500 shrink-0">Sensitivity</span>
+            <input
+              type="range"
+              min={1}
+              max={5}
+              step={0.5}
+              value={heatmapSensitivity}
+              onChange={(e) => setHeatmapSensitivity(Number(e.target.value))}
+              className="flex-1"
+            />
+            <span className="text-gray-400 w-6 text-right">{heatmapSensitivity}</span>
+          </div>
         </div>
       )}
       {nearMeActive && (
