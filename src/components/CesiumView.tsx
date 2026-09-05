@@ -190,12 +190,30 @@ export function CesiumView() {
     // Photoreal 3D city mesh when an Ion token is present. Try Google's tiles
     // first (the real "wow" factor); fall back to Cesium OSM Buildings if
     // that asset isn't enabled on this Ion account.
+    //
+    // enableCollision is required for HeightReference.CLAMP_TO_GROUND to
+    // clamp against this tileset's own surface rather than falling back to
+    // the bare terrain height field underneath - per Cesium's own docs on
+    // HeightReference.CLAMP_TO_GROUND: "When clamping to 3D Tilesets such as
+    // photorealistic 3D Tiles, ensure the tileset has enableCollision set to
+    // true. Otherwise, the entity may not be correctly clamped to the
+    // tileset surface." Root cause of vehicles appearing to hover ~10m above
+    // the visible street (2026-09-05) - bare terrain and the photorealistic
+    // tileset's actual road/ground surface are different height fields, and
+    // without this flag vehicles were clamped to the former while the
+    // visible ground came from the latter. Confirmed the model file itself
+    // was not the cause first (its own pivot sits within 1.2cm of the
+    // vehicle's true ground contact point - checked directly against the
+    // glTF's node transforms and mesh bounding box).
     if (ION_TOKEN) {
-      void createGooglePhotorealistic3DTileset()
+      void createGooglePhotorealistic3DTileset(undefined, { enableCollision: true })
         .then((ts) => viewer.scene.primitives.add(ts))
         .catch(() => {
           void createOsmBuildingsAsync()
-            .then((ts) => viewer.scene.primitives.add(ts))
+            .then((ts) => {
+              ts.enableCollision = true;
+              viewer.scene.primitives.add(ts);
+            })
             .catch(() => {
               /* keyless base already renders fine without buildings */
             });
@@ -251,8 +269,11 @@ export function CesiumView() {
 
   // #11 "next vehicle near me", v2 (2026-09-05): nearest STOP(s), not nearest
   // live vehicle. Both sides of the street are separate stop_ids a few
-  // metres apart, so "nearest 3" naturally covers both directions without
-  // needing to explicitly pair them up. Recomputed only when the user's
+  // metres apart, so "nearest 4" usually covers both directions without
+  // needing to explicitly pair them up - not guaranteed for every stop
+  // layout (a busy intersection can have more than 2 stops within the same
+  // radius), which is why this is a count, not real direction-pairing logic.
+  // Recomputed only when the user's
   // location actually changes (stop positions/schedules don't change every
   // 8s poll) - see stopService.ts. The live-proximity check below is the
   // thing that needs to re-run every poll.
@@ -263,7 +284,7 @@ export function CesiumView() {
       return;
     }
     let cancelled = false;
-    void getNearestStops(userLocation.lat, userLocation.lon, 3).then((stops) => {
+    void getNearestStops(userLocation.lat, userLocation.lon, 4).then((stops) => {
       if (!cancelled) setNearestStops(stops);
     });
     return () => {
@@ -278,16 +299,20 @@ export function CesiumView() {
   // the one approaching THIS stop, not some other direction's service.
   const NEAR_BUS_RADIUS_METERS = 3000;
   const liveRouteProximity = useMemo(() => {
-    const nearby = new Map<string, number>(); // `${stopId}|${routeId}` -> metres to nearest live match
+    // `${stopId}|${routeId}` -> nearest live match, so clicking it can
+    // select/fly to that exact vehicle, not just show its distance.
+    const nearby = new Map<string, { vehicleId: string; distanceMeters: number }>();
     for (const stop of nearestStops) {
       for (const route of stop.routes) {
-        let best = Infinity;
+        let best: { vehicleId: string; distanceMeters: number } | null = null;
         for (const bus of busDataRef.current.values()) {
           if (bus.routeId !== route.routeId) continue;
           const d = haversineMeters(bus.lat, bus.lon, stop.lat, stop.lon);
-          if (d < best) best = d;
+          if (!best || d < best.distanceMeters) best = { vehicleId: bus.id, distanceMeters: d };
         }
-        if (best <= NEAR_BUS_RADIUS_METERS) nearby.set(`${stop.stopId}|${route.routeId}`, best);
+        if (best && best.distanceMeters <= NEAR_BUS_RADIUS_METERS) {
+          nearby.set(`${stop.stopId}|${route.routeId}`, best);
+        }
       }
     }
     return nearby;
@@ -368,7 +393,7 @@ export function CesiumView() {
 
   // Small markers for the nearest stops themselves, so "Near me" has a
   // visual anchor on the globe, not just a text list. Cheap to fully
-  // rebuild on each change since there are at most 3.
+  // rebuild on each change since there are at most 4.
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
@@ -628,6 +653,12 @@ export function CesiumView() {
       </div>
       {nearMeActive && (
         <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          {userLocation && nearestStops.length > 0 && (
+            <div className="px-3 py-1.5 border-b border-gray-100 text-[11px] text-gray-400 sticky top-0 bg-white/95">
+              Now: {formatArrivalClock(secondsSinceMidnightNow())} — arrival times below are offsets
+              from this
+            </div>
+          )}
           {!userLocation ? (
             <div className="px-3 py-2 text-gray-400">
               {locationError ?? 'Finding your location…'}
@@ -661,7 +692,7 @@ export function CesiumView() {
                   ) : (
                     <div className="mt-1 flex flex-col gap-0.5">
                       {stop.routes.map((route) => {
-                        const liveDist = liveRouteProximity.get(`${stop.stopId}|${route.routeId}`);
+                        const live = liveRouteProximity.get(`${stop.stopId}|${route.routeId}`);
                         return (
                           <div
                             key={route.routeId}
@@ -670,15 +701,29 @@ export function CesiumView() {
                             <span className="font-medium text-gray-700 shrink-0">
                               Route {route.routeId}
                             </span>
-                            {liveDist !== undefined ? (
-                              <span className="text-green-600 font-medium truncate">
-                                🔴 Live · ~{formatDistance(liveDist)} away
-                              </span>
+                            {live !== undefined ? (
+                              // A live match on this exact route is a click target of its own -
+                              // selects and flies to that specific vehicle, not just the stop.
+                              // stopPropagation so this doesn't also trigger the stop's own
+                              // fly-to-stop click above.
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedId(live.vehicleId);
+                                  const entity = entitiesRef.current.get(live.vehicleId);
+                                  const viewer = viewerRef.current;
+                                  if (entity && viewer) void viewer.flyTo(entity);
+                                }}
+                                className="text-green-600 hover:text-green-700 font-medium truncate underline decoration-dotted"
+                              >
+                                🔴 Live · ~{formatDistance(live.distanceMeters)} away
+                              </button>
                             ) : (
                               <span className="text-gray-500 truncate">
                                 {route.nextArrivalsSeconds
                                   .map(
-                                    (t) => `${formatArrivalClock(t)} (${minutesUntil(t, nowSecs)}m)`,
+                                    (t) =>
+                                      `${formatArrivalClock(t)} (+${minutesUntil(t, nowSecs)}m)`,
                                   )
                                   .join(', ')}
                               </span>
