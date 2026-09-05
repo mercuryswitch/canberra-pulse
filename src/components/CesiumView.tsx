@@ -29,9 +29,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { type BusPosition, fetchBuses } from '@/services/busService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
-import { getShapeForTrip, haversineMeters, preloadShapes, snapToShape } from '@/services/shapeService';
+import {
+  getHeadsignForTrip,
+  getShapeForTrip,
+  haversineMeters,
+  preloadShapes,
+  shapeOrigin,
+  snapToShape,
+} from '@/services/shapeService';
 import {
   formatArrivalClock,
+  getNearestStopName,
   getNearestStops,
   minutesUntil,
   type NearestStop,
@@ -87,6 +95,10 @@ interface NextBusRow {
   atTerminus: boolean;
   /** Metres from the vehicle to the clicked stop, straight-line. */
   distanceMeters: number;
+  /** "Dickson to City (25)" - nearest-stop-to-shape-origin + headsign + route. Null if unresolvable. */
+  directionLabel: string | null;
+  /** Nearest stop name to the vehicle's current position, e.g. "Dickson Interchange". */
+  currentLocationName: string | null;
 }
 
 function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void }) {
@@ -248,22 +260,41 @@ export function CesiumView() {
     setSelectedBus(selectedId ? (busDataRef.current.get(selectedId) ?? null) : null);
   }, [selectedId, busCount, railCount]);
 
+  // #12 route navigator (2026-09-05): pick a specific route_id from a list
+  // of every route currently in the live feed, rather than just bus/rail
+  // type. Takes priority over the type filter when set - mutually exclusive
+  // with it and with Near Me in the UI, same "avoid two competing panels"
+  // rule as everything else here.
+  const [routeFilter, setRouteFilter] = useState<string | null>(null);
+  const [showRoutesList, setShowRoutesList] = useState(false);
+  const allRoutes = useMemo(() => {
+    const routes = new Set<string>();
+    for (const bus of busDataRef.current.values()) routes.add(bus.routeId);
+    return Array.from(routes).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
+    // ref; pollTick is the actual trigger for recomputing this each poll.
+  }, [pollTick]);
+
   // The poll loop below has an empty dependency array (it's a long-lived
   // interval, not something to restart on every filter click), so it reads
   // the current filter through this ref rather than a stale closure value.
   const filterTypeRef = useRef(filterType);
+  const routeFilterRef = useRef(routeFilter);
   useEffect(() => {
     filterTypeRef.current = filterType;
+    routeFilterRef.current = routeFilter;
     const viewer = viewerRef.current;
     if (!viewer) return;
     const visible: Entity[] = [];
     for (const [id, entity] of entitiesRef.current) {
-      const show = filterType === 'all' || (filterType === 'rail') === isLightRail(id);
+      const show = routeFilter
+        ? busDataRef.current.get(id)?.routeId === routeFilter
+        : filterType === 'all' || (filterType === 'rail') === isLightRail(id);
       entity.show = show;
       if (show) visible.push(entity);
     }
-    if (filterType !== 'all' && visible.length > 0) void viewer.flyTo(visible);
-  }, [filterType]);
+    if ((filterType !== 'all' || routeFilter) && visible.length > 0) void viewer.flyTo(visible);
+  }, [filterType, routeFilter]);
 
   // Raw data list backing the "Bus"/"Light rail" filter buttons - lets you
   // verify exactly which vehicle IDs are actually in the feed right now,
@@ -364,15 +395,25 @@ export function CesiumView() {
         }
         if (!nearest) continue; // no vehicle at all on this route - do nothing for it
         let atTerminus = false;
+        let directionLabel: string | null = null;
         const shape = await getShapeForTrip(nearest.tripId);
         if (shape) {
           atTerminus = snapToShape(shape, nearest.lat, nearest.lon).distanceAlong <= TERMINUS_THRESHOLD_METERS;
+          const origin = shapeOrigin(shape);
+          const [originName, headsign] = await Promise.all([
+            origin ? getNearestStopName(origin.lat, origin.lon) : Promise.resolve(null),
+            getHeadsignForTrip(nearest.tripId),
+          ]);
+          if (originName && headsign) directionLabel = `${originName} to ${headsign} (${route.routeId})`;
         }
+        const currentLocationName = await getNearestStopName(nearest.lat, nearest.lon);
         rows.push({
           routeId: route.routeId,
           vehicleId: nearest.id,
           atTerminus,
           distanceMeters: nearestDist,
+          directionLabel,
+          currentLocationName,
         });
       }
       if (!cancelled) setNextBusRows(rows);
@@ -636,9 +677,10 @@ export function CesiumView() {
                 colorBlendMode: ColorBlendMode.HIGHLIGHT,
               },
             });
-            entity.show =
-              filterTypeRef.current === 'all' ||
-              (filterTypeRef.current === 'rail') === isLightRail(bus.id);
+            entity.show = routeFilterRef.current
+              ? bus.routeId === routeFilterRef.current
+              : filterTypeRef.current === 'all' ||
+                (filterTypeRef.current === 'rail') === isLightRail(bus.id);
             entitiesRef.current.set(bus.id, entity);
           }
         }
@@ -679,6 +721,8 @@ export function CesiumView() {
         <button
           onClick={() => {
             if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
             setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -694,6 +738,8 @@ export function CesiumView() {
         <button
           onClick={() => {
             if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
             setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -707,13 +753,35 @@ export function CesiumView() {
           {railCount} Light rail
         </button>
         <button
-          onClick={toggleNearMe}
+          onClick={() => {
+            setShowRoutesList(false);
+            setRouteFilter(null);
+            toggleNearMe();
+          }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
             nearMeActive ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
           }`}
         >
           <span aria-hidden>📍</span>
           Near me
+        </button>
+        <button
+          onClick={() => {
+            if (showRoutesList) {
+              setShowRoutesList(false);
+              setRouteFilter(null);
+              return;
+            }
+            if (nearMeActive) toggleNearMe();
+            setFilterType('all');
+            setShowRoutesList(true);
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
+            showRoutesList ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+          }`}
+        >
+          <span aria-hidden>🛣️</span>
+          Routes
         </button>
       </div>
       {nearMeActive && (
@@ -834,14 +902,18 @@ export function CesiumView() {
                 const viewer = viewerRef.current;
                 if (entity && viewer) void viewer.flyTo(entity);
               }}
-              className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+              className="w-full flex flex-col items-start gap-0.5 px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
             >
-              <span className="font-medium text-gray-700">Route {row.routeId}</span>
-              <span className="text-xs text-gray-500 text-right">
+              <span className="font-medium text-gray-700">
+                {row.directionLabel ?? `Route ${row.routeId}`}
+              </span>
+              <span className="text-xs text-gray-500">
+                {row.currentLocationName ? `Near ${row.currentLocationName}` : 'Location unknown'}
+                {' · '}
                 {row.atTerminus ? (
                   <span className="text-amber-600 font-medium">At terminus</span>
                 ) : (
-                  <span>~{formatDistance(row.distanceMeters)} away</span>
+                  <span>~{formatDistance(row.distanceMeters)} from stop</span>
                 )}
               </span>
             </button>
@@ -866,6 +938,38 @@ export function CesiumView() {
               >
                 <span className="font-medium">{b.id}</span>
                 <span className="text-gray-400 text-xs">route {b.routeId}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      {/* #12 route navigator (2026-09-05): every route currently in the live
+          feed, clickable to isolate just that route's vehicles on the map.
+          Kept as a plain scrollable list rather than inline buttons like
+          Bus/Rail - there can be dozens of routes, unlike two vehicle types,
+          so this needed a different visual treatment. */}
+      {showRoutesList && (
+        <div className="absolute top-16 left-4 z-20 w-56 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          {routeFilter && (
+            <button
+              onClick={() => setRouteFilter(null)}
+              className="w-full px-3 py-2 text-left text-gray-500 hover:bg-gray-100 border-b border-gray-100"
+            >
+              &larr; Show all routes
+            </button>
+          )}
+          {allRoutes.length === 0 ? (
+            <div className="px-3 py-2 text-gray-400">No routes active right now</div>
+          ) : (
+            allRoutes.map((routeId) => (
+              <button
+                key={routeId}
+                onClick={() => setRouteFilter(routeId)}
+                className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-100 border-b border-gray-100 last:border-0 ${
+                  routeFilter === routeId ? 'bg-gray-900 text-white hover:bg-gray-900' : ''
+                }`}
+              >
+                <span className="font-medium">Route {routeId}</span>
               </button>
             ))
           )}
