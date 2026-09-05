@@ -79,6 +79,16 @@ function formatDistance(metres: number): string {
   return metres < 1000 ? `${Math.round(metres)} m` : `${(metres / 1000).toFixed(1)} km`;
 }
 
+/** One row in the "NextBus" panel - the nearest live vehicle on one route serving a clicked stop. */
+interface NextBusRow {
+  routeId: string;
+  vehicleId: string;
+  /** Sitting at/near the start of its shape - not yet meaningfully underway. */
+  atTerminus: boolean;
+  /** Metres from the vehicle to the clicked stop, straight-line. */
+  distanceMeters: number;
+}
+
 function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void }) {
   const rows: [string, string][] = [
     ['Vehicle', bus.id],
@@ -320,6 +330,60 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [nearestStops, pollTick]);
 
+  // "NextBus" side panel (2026-09-05, Ross's ask): clicking a stop opens a
+  // dedicated panel next to the stop list showing, per route serving that
+  // stop, the single nearest live vehicle on that exact route_id - no
+  // distance cap this time (unlike liveRouteProximity above, which only
+  // flags a live match within 3km of the stop for the inline indicator).
+  // A vehicle still sitting at/near the start of its shape is labelled
+  // "at terminus" rather than a stop-distance, since "close to the terminus"
+  // isn't a meaningful signal for when it'll actually arrive. A route with no
+  // live vehicle at all is silently omitted - never a placeholder row.
+  const [nextBusStopId, setNextBusStopId] = useState<string | null>(null);
+  const [nextBusRows, setNextBusRows] = useState<NextBusRow[]>([]);
+  const TERMINUS_THRESHOLD_METERS = 300;
+  useEffect(() => {
+    const stop = nextBusStopId ? nearestStops.find((s) => s.stopId === nextBusStopId) : undefined;
+    if (!stop) {
+      setNextBusRows([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const rows: NextBusRow[] = [];
+      for (const route of stop.routes) {
+        let nearest: BusPosition | null = null;
+        let nearestDist = Infinity;
+        for (const bus of busDataRef.current.values()) {
+          if (bus.routeId !== route.routeId) continue;
+          const d = haversineMeters(bus.lat, bus.lon, stop.lat, stop.lon);
+          if (d < nearestDist) {
+            nearestDist = d;
+            nearest = bus;
+          }
+        }
+        if (!nearest) continue; // no vehicle at all on this route - do nothing for it
+        let atTerminus = false;
+        const shape = await getShapeForTrip(nearest.tripId);
+        if (shape) {
+          atTerminus = snapToShape(shape, nearest.lat, nearest.lon).distanceAlong <= TERMINUS_THRESHOLD_METERS;
+        }
+        rows.push({
+          routeId: route.routeId,
+          vehicleId: nearest.id,
+          atTerminus,
+          distanceMeters: nearestDist,
+        });
+      }
+      if (!cancelled) setNextBusRows(rows);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // busDataRef is a ref (no lint complaint about it as a missing dep);
+    // pollTick is the actual trigger for recomputing this each poll.
+  }, [nextBusStopId, nearestStops, pollTick]);
+
   // Toggling "Near me" on/off starts/stops the browser's own geolocation
   // watch. watchPosition (not a one-shot getCurrentPosition) so the list and
   // the on-globe marker stay live if you're actually walking around with the
@@ -331,6 +395,7 @@ export function CesiumView() {
       setNearMeActive(false);
       setUserLocation(null);
       setLocationError(null);
+      setNextBusStopId(null);
       hasFlownToUserRef.current = false;
       const viewer = viewerRef.current;
       if (viewer && userEntityRef.current) {
@@ -671,14 +736,18 @@ export function CesiumView() {
               return (
                 <div
                   key={stop.stopId}
-                  className="px-3 py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50"
+                  className={`px-3 py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50 ${
+                    nextBusStopId === stop.stopId ? 'bg-blue-50' : ''
+                  }`}
                   onClick={() => {
                     const viewer = viewerRef.current;
-                    if (!viewer) return;
-                    void viewer.camera.flyTo({
-                      destination: Cartesian3.fromDegrees(stop.lon, stop.lat, 800),
-                      duration: 1.2,
-                    });
+                    if (viewer) {
+                      void viewer.camera.flyTo({
+                        destination: Cartesian3.fromDegrees(stop.lon, stop.lat, 800),
+                        duration: 1.2,
+                      });
+                    }
+                    setNextBusStopId(stop.stopId);
                   }}
                 >
                   <div className="flex items-baseline justify-between gap-2">
@@ -737,6 +806,46 @@ export function CesiumView() {
               );
             })
           )}
+        </div>
+      )}
+      {/* "NextBus" panel - opens next to the stop list when a stop is
+          clicked. Silently absent whenever nextBusRows is empty (no live
+          vehicle on any route serving that stop) rather than showing an
+          empty/placeholder panel - per Ross's "if there is none on route do
+          nothing" instruction. */}
+      {nearMeActive && nextBusStopId && nextBusRows.length > 0 && (
+        <div className="absolute top-16 left-[22rem] z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+            <span className="font-medium">Next bus</span>
+            <button
+              onClick={() => setNextBusStopId(null)}
+              aria-label="Close"
+              className="text-gray-400 hover:text-gray-700 text-lg leading-none"
+            >
+              &times;
+            </button>
+          </div>
+          {nextBusRows.map((row) => (
+            <button
+              key={row.routeId}
+              onClick={() => {
+                setSelectedId(row.vehicleId);
+                const entity = entitiesRef.current.get(row.vehicleId);
+                const viewer = viewerRef.current;
+                if (entity && viewer) void viewer.flyTo(entity);
+              }}
+              className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+            >
+              <span className="font-medium text-gray-700">Route {row.routeId}</span>
+              <span className="text-xs text-gray-500 text-right">
+                {row.atTerminus ? (
+                  <span className="text-amber-600 font-medium">At terminus</span>
+                ) : (
+                  <span>~{formatDistance(row.distanceMeters)} away</span>
+                )}
+              </span>
+            </button>
+          ))}
         </div>
       )}
       {!nearMeActive && filterType !== 'all' && (
