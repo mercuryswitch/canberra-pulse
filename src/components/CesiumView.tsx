@@ -1,4 +1,5 @@
 import {
+  Cartesian2,
   Cartesian3,
   Color,
   ColorBlendMode,
@@ -11,6 +12,7 @@ import {
   ImageryLayer,
   Ion,
   JulianDate,
+  LabelStyle,
   LinearApproximation,
   Math as CesiumMath,
   OpenStreetMapImageryProvider,
@@ -28,6 +30,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { type BusPosition, fetchBuses } from '@/services/busService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
 import { getShapeForTrip, haversineMeters, preloadShapes, snapToShape } from '@/services/shapeService';
+import {
+  formatArrivalClock,
+  getNearestStops,
+  minutesUntil,
+  type NearestStop,
+  preloadStopArrivals,
+  secondsSinceMidnightNow,
+} from '@/services/stopService';
 
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
 // Google Photorealistic 3D Tiles. Without it we fall back to keyless
@@ -124,6 +134,7 @@ export function CesiumView() {
   const [locationError, setLocationError] = useState<string | null>(null);
   const watchIdRef = useRef<number | null>(null);
   const userEntityRef = useRef<Entity | null>(null);
+  const stopEntitiesRef = useRef<Entity[]>([]);
   const hasFlownToUserRef = useRef(false);
 
   // Fetch the route-shapes snapshot once up front, so by the time real
@@ -238,22 +249,51 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [filterType, pollTick]);
 
-  // #11 "next vehicle near me": every currently-active vehicle, sorted by
-  // straight-line distance from the browser's own geolocation. Reuses the
-  // same busDataRef the type-filter list reads from - no new data pipeline,
-  // just a different sort/slice over data we're already polling.
-  const nearestList = useMemo(() => {
-    if (!nearMeActive || !userLocation) return [];
-    return Array.from(busDataRef.current.values())
-      .map((b) => ({
-        bus: b,
-        distance: haversineMeters(userLocation.lat, userLocation.lon, b.lat, b.lon),
-      }))
-      .sort((a, b) => a.distance - b.distance)
-      .slice(0, 8);
+  // #11 "next vehicle near me", v2 (2026-09-05): nearest STOP(s), not nearest
+  // live vehicle. Both sides of the street are separate stop_ids a few
+  // metres apart, so "nearest 3" naturally covers both directions without
+  // needing to explicitly pair them up. Recomputed only when the user's
+  // location actually changes (stop positions/schedules don't change every
+  // 8s poll) - see stopService.ts. The live-proximity check below is the
+  // thing that needs to re-run every poll.
+  const [nearestStops, setNearestStops] = useState<NearestStop[]>([]);
+  useEffect(() => {
+    if (!nearMeActive || !userLocation) {
+      setNearestStops([]);
+      return;
+    }
+    let cancelled = false;
+    void getNearestStops(userLocation.lat, userLocation.lon, 3).then((stops) => {
+      if (!cancelled) setNearestStops(stops);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [nearMeActive, userLocation]);
+
+  // A live vehicle actually on the route, within this radius of the stop, is
+  // a far better "next bus" signal than the static timetable - no ETA/shape
+  // math needed: a physical stop only serves one direction, so any live
+  // vehicle on that exact route_id nearby is (per Ross, 2026-09-05) reliably
+  // the one approaching THIS stop, not some other direction's service.
+  const NEAR_BUS_RADIUS_METERS = 3000;
+  const liveRouteProximity = useMemo(() => {
+    const nearby = new Map<string, number>(); // `${stopId}|${routeId}` -> metres to nearest live match
+    for (const stop of nearestStops) {
+      for (const route of stop.routes) {
+        let best = Infinity;
+        for (const bus of busDataRef.current.values()) {
+          if (bus.routeId !== route.routeId) continue;
+          const d = haversineMeters(bus.lat, bus.lon, stop.lat, stop.lon);
+          if (d < best) best = d;
+        }
+        if (best <= NEAR_BUS_RADIUS_METERS) nearby.set(`${stop.stopId}|${route.routeId}`, best);
+      }
+    }
+    return nearby;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
     // ref; pollTick is the actual trigger for recomputing this each poll.
-  }, [nearMeActive, userLocation, pollTick]);
+  }, [nearestStops, pollTick]);
 
   // Toggling "Near me" on/off starts/stops the browser's own geolocation
   // watch. watchPosition (not a one-shot getCurrentPosition) so the list and
@@ -281,6 +321,7 @@ export function CesiumView() {
     setFilterType('all'); // avoid two competing side-panels at once
     setNearMeActive(true);
     setLocationError(null);
+    void preloadStopArrivals(); // bigger asset than route shapes - fetch only when actually needed
     watchIdRef.current = navigator.geolocation.watchPosition(
       (pos) => {
         setLocationError(null);
@@ -324,6 +365,42 @@ export function CesiumView() {
       void viewer.flyTo(userEntityRef.current, { duration: 1.5 });
     }
   }, [userLocation]);
+
+  // Small markers for the nearest stops themselves, so "Near me" has a
+  // visual anchor on the globe, not just a text list. Cheap to fully
+  // rebuild on each change since there are at most 3.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    for (const entity of stopEntitiesRef.current) viewer.entities.remove(entity);
+    stopEntitiesRef.current = nearestStops.map((stop) =>
+      viewer.entities.add({
+        id: `__stop_${stop.stopId}`,
+        position: Cartesian3.fromDegrees(stop.lon, stop.lat),
+        point: {
+          pixelSize: 10,
+          color: Color.WHITE,
+          outlineColor: Color.fromCssColorString('#334155'),
+          outlineWidth: 2,
+          heightReference: HeightReference.CLAMP_TO_GROUND,
+        },
+        label: {
+          text: stop.name,
+          font: '12px sans-serif',
+          pixelOffset: new Cartesian2(0, -16),
+          fillColor: Color.WHITE,
+          outlineColor: Color.BLACK,
+          outlineWidth: 3,
+          style: LabelStyle.FILL_AND_OUTLINE,
+          heightReference: HeightReference.CLAMP_TO_GROUND,
+        },
+      }),
+    );
+    return () => {
+      for (const entity of stopEntitiesRef.current) viewer.entities.remove(entity);
+      stopEntitiesRef.current = [];
+    };
+  }, [nearestStops]);
 
   // Stop the geolocation watch if the component unmounts with it running.
   useEffect(() => {
@@ -550,38 +627,70 @@ export function CesiumView() {
         </button>
       </div>
       {nearMeActive && (
-        <div className="absolute top-16 left-4 z-20 w-64 max-h-[60vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
           {!userLocation ? (
             <div className="px-3 py-2 text-gray-400">
               {locationError ?? 'Finding your location…'}
             </div>
-          ) : nearestList.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">No vehicles right now</div>
+          ) : nearestStops.length === 0 ? (
+            <div className="px-3 py-2 text-gray-400">Loading nearby stops…</div>
           ) : (
-            nearestList.map(({ bus, distance }) => (
-              <button
-                key={bus.id}
-                onClick={() => {
-                  setSelectedId(bus.id);
-                  const entity = entitiesRef.current.get(bus.id);
-                  const viewer = viewerRef.current;
-                  if (entity && viewer) void viewer.flyTo(entity);
-                }}
-                className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-100 border-b border-gray-100 last:border-0"
-              >
-                <span className="flex items-center gap-1.5">
-                  <span
-                    className="inline-block w-2 h-2 rounded-full shrink-0"
-                    style={{
-                      backgroundColor: isLightRail(bus.id) ? TYPE_COLOR.rail : TYPE_COLOR.bus,
-                    }}
-                  />
-                  <span className="font-medium">{bus.id}</span>
-                  <span className="text-gray-400 text-xs">route {bus.routeId}</span>
-                </span>
-                <span className="text-gray-500 text-xs shrink-0">{formatDistance(distance)}</span>
-              </button>
-            ))
+            nearestStops.map((stop) => {
+              const nowSecs = secondsSinceMidnightNow();
+              return (
+                <div
+                  key={stop.stopId}
+                  className="px-3 py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50"
+                  onClick={() => {
+                    const viewer = viewerRef.current;
+                    if (!viewer) return;
+                    void viewer.camera.flyTo({
+                      destination: Cartesian3.fromDegrees(stop.lon, stop.lat, 800),
+                      duration: 1.2,
+                    });
+                  }}
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-medium truncate">{stop.name}</span>
+                    <span className="text-gray-400 text-xs shrink-0">
+                      {formatDistance(stop.distanceMeters)}
+                    </span>
+                  </div>
+                  {stop.routes.length === 0 ? (
+                    <div className="text-gray-400 text-xs mt-1">No scheduled services today</div>
+                  ) : (
+                    <div className="mt-1 flex flex-col gap-0.5">
+                      {stop.routes.map((route) => {
+                        const liveDist = liveRouteProximity.get(`${stop.stopId}|${route.routeId}`);
+                        return (
+                          <div
+                            key={route.routeId}
+                            className="flex items-center justify-between text-xs gap-2"
+                          >
+                            <span className="font-medium text-gray-700 shrink-0">
+                              Route {route.routeId}
+                            </span>
+                            {liveDist !== undefined ? (
+                              <span className="text-green-600 font-medium truncate">
+                                🔴 Live · ~{formatDistance(liveDist)} away
+                              </span>
+                            ) : (
+                              <span className="text-gray-500 truncate">
+                                {route.nextArrivalsSeconds
+                                  .map(
+                                    (t) => `${formatArrivalClock(t)} (${minutesUntil(t, nowSecs)}m)`,
+                                  )
+                                  .join(', ')}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       )}
@@ -617,13 +726,29 @@ export function CesiumView() {
           }}
         />
       )}
+      {/* Deliberately a hard-to-miss modal, not a small corner button - a small
+          button here is how the 2026-09 "0 vehicles, no error" saga happened:
+          signing into the app itself (Rayfin auth) is a separate step from
+          authorizing this specific Kusto/Eventhouse client, and the small
+          version of this prompt went unnoticed for days while everyone
+          assumed the *data* was broken. Make the state itself undeniable. */}
       {needsConnect && (
-        <button
-          onClick={() => void connectDataInteractive()}
-          className="absolute top-4 right-4 bg-gray-900 text-white rounded-lg px-4 py-2 text-sm"
-        >
-          Connect live data
-        </button>
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/50">
+          <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm text-center">
+            <div className="text-3xl mb-2">🔌</div>
+            <h2 className="font-bold text-lg mb-1 text-gray-900">Live data not connected</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              One extra sign-in step is needed to read live vehicle positions - separate from
+              signing into this app.
+            </p>
+            <button
+              onClick={() => void connectDataInteractive()}
+              className="bg-gray-900 hover:bg-gray-800 transition-colors text-white rounded-lg px-6 py-3 font-medium w-full"
+            >
+              Connect live data
+            </button>
+          </div>
+        </div>
       )}
       {error && (
         <div className="absolute bottom-4 left-4 bg-red-50 text-red-700 rounded-lg px-4 py-2 text-sm">
