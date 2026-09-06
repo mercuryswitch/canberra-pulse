@@ -56,6 +56,16 @@ export interface StopArrivalsSnapshot {
   calendar: Record<string, CalendarEntry>;
   /** service_id -> [date (YYYYMMDD), exception_type (1=added, 2=removed)][] */
   calendarDates: Record<string, [string, 1 | 2][]>;
+  /**
+   * trip_id -> stop_id -> scheduled arrival, seconds since midnight. Powers
+   * #2 on-time performance: when a live vehicle's current_status is
+   * STOPPED_AT a specific stop_id, this is what its *actual* arrival time
+   * (from the live feed's own timestamp) gets compared against. Keyed by
+   * the exact trip_id (unlike `arrivals` above, which deliberately merges
+   * across trips per route+service for the Near Me use case) - on-time
+   * performance is inherently a per-trip question, not a per-route one.
+   */
+  tripStopArrival: Record<string, Record<string, number>>;
 }
 
 /** Same resolution logic as gtfsShapes.ts - kept local to avoid a cross-file coupling for one helper. */
@@ -184,6 +194,7 @@ export async function buildStopArrivalsSnapshot(rootDir: string): Promise<StopAr
   }
 
   const arrivals: Record<string, Record<string, Record<string, number[]>>> = {};
+  const tripStopArrival: Record<string, Record<string, number>> = {};
   {
     const rows = csvRows(decoder.decode(unzipped['stop_times.txt']));
     const header = rows.next().value as string[];
@@ -192,7 +203,8 @@ export async function buildStopArrivalsSnapshot(rootDir: string): Promise<StopAr
     const iArr = columnIndex(header, 'arrival_time');
     for (const r of rows) {
       const stopId = r[iStop];
-      const info = tripInfo[r[iTrip]];
+      const tripId = r[iTrip];
+      const info = tripInfo[tripId];
       if (!stopId || !info) continue;
       const [routeId, serviceId] = info;
       const secs = parseGtfsTime(r[iArr] ?? '');
@@ -200,6 +212,7 @@ export async function buildStopArrivalsSnapshot(rootDir: string): Promise<StopAr
       const byRoute = (arrivals[stopId] ??= {});
       const byService = (byRoute[routeId] ??= {});
       (byService[serviceId] ??= []).push(secs);
+      (tripStopArrival[tripId] ??= {})[stopId] = secs;
     }
     for (const byRoute of Object.values(arrivals)) {
       for (const byService of Object.values(byRoute)) {
@@ -253,5 +266,12 @@ export async function buildStopArrivalsSnapshot(rootDir: string): Promise<StopAr
     }
   }
 
-  return { generatedAt: new Date().toISOString(), stops, arrivals, calendar, calendarDates };
+  return {
+    generatedAt: new Date().toISOString(),
+    stops,
+    arrivals,
+    calendar,
+    calendarDates,
+    tripStopArrival,
+  };
 }

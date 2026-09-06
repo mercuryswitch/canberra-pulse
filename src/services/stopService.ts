@@ -23,6 +23,7 @@ interface StopArrivalsSnapshot {
   arrivals: Record<string, Record<string, Record<string, number[]>>>;
   calendar: Record<string, CalendarEntry>;
   calendarDates: Record<string, [string, 1 | 2][]>;
+  tripStopArrival: Record<string, Record<string, number>>;
 }
 
 export interface RouteArrival {
@@ -188,4 +189,36 @@ export function minutesUntil(arrivalSeconds: number, nowSecondsSinceMidnight: nu
 export function secondsSinceMidnightNow(): number {
   const now = new Date();
   return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+}
+
+/** Convert a Date into seconds-since-midnight, in local time - for comparing a live fix's own timestamp against a schedule. */
+export function secondsSinceMidnightOf(date: Date): number {
+  return date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+}
+
+/**
+ * #2 on-time performance: this specific trip's scheduled arrival at this
+ * specific stop, in seconds since midnight - or null if this trip/stop pair
+ * isn't in the schedule (e.g. a trip pattern that changed since the
+ * snapshot was built, same fallback reasoning as route map-matching).
+ */
+export async function getScheduledArrival(tripId: string, stopId: string): Promise<number | null> {
+  const snap = await loadSnapshot();
+  return snap?.tripStopArrival[tripId]?.[stopId] ?? null;
+}
+
+export interface Punctuality {
+  /** Positive = late, negative = early, in whole minutes. */
+  delayMinutes: number;
+  label: string;
+}
+
+/** Scheduled vs actual arrival, seconds since midnight - both should be from the same calendar day. */
+export function computePunctuality(scheduledSeconds: number, actualSeconds: number): Punctuality {
+  const delayMinutes = Math.round((actualSeconds - scheduledSeconds) / 60);
+  let label: string;
+  if (Math.abs(delayMinutes) < 2) label = 'On time';
+  else if (delayMinutes > 0) label = `${delayMinutes} min late`;
+  else label = `${Math.abs(delayMinutes)} min early`;
+  return { delayMinutes, label };
 }

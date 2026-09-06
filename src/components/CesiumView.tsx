@@ -47,14 +47,18 @@ import {
   snapToShape,
 } from '@/services/shapeService';
 import {
+  computePunctuality,
   formatArrivalClock,
   getAllStopCoordinates,
   getNearestStopName,
   getNearestStops,
+  getScheduledArrival,
   minutesUntil,
   type NearestStop,
   preloadStopArrivals,
+  type Punctuality,
   secondsSinceMidnightNow,
+  secondsSinceMidnightOf,
 } from '@/services/stopService';
 
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
@@ -114,7 +118,34 @@ interface NextBusRow {
   currentLocationName: string | null;
 }
 
+/** One row in the #2 on-time performance panel - a currently-stopped vehicle with a resolvable schedule match. */
+interface OnTimeEntry {
+  vehicleId: string;
+  routeId: string;
+  stopId: string;
+  punctuality: Punctuality;
+}
+
 function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void }) {
+  // #2 on-time performance (2026-09-06): only meaningful when the vehicle
+  // is actually stopped at a known stop - "on time" isn't well-defined for
+  // a vehicle mid-route between stops. stop_id only exists on rows ingested
+  // since the pipeline change, so older-looking vehicles simply won't have
+  // one yet even while STOPPED_AT.
+  const [punctuality, setPunctuality] = useState<Punctuality | null>(null);
+  useEffect(() => {
+    setPunctuality(null);
+    if (bus.status !== 'STOPPED_AT' || !bus.stopId) return;
+    let cancelled = false;
+    void getScheduledArrival(bus.tripId, bus.stopId).then((scheduledSeconds) => {
+      if (cancelled || scheduledSeconds == null) return;
+      setPunctuality(computePunctuality(scheduledSeconds, secondsSinceMidnightOf(new Date(bus.ts))));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [bus.tripId, bus.stopId, bus.status, bus.ts]);
+
   const rows: [string, string][] = [
     ['Vehicle', bus.id],
     ['Type', isLightRail(bus.id) ? 'Light rail' : 'Bus'],
@@ -124,6 +155,7 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
     ['Position', `${bus.lat.toFixed(5)}, ${bus.lon.toFixed(5)}`],
     ['Last update', new Date(bus.ts).toLocaleTimeString()],
   ];
+  if (punctuality) rows.push(['Punctuality', punctuality.label]);
   // A bottom bar rather than a tall left-side panel (2026-09-05, Ross's
   // ask) - the left side is where the Bus/Rail/Routes/etc. lists live, and
   // the old top-20/bottom-4 panel was covering them whenever a vehicle from
@@ -306,6 +338,13 @@ export function CesiumView() {
   const [heatmapSensitivity, setHeatmapSensitivity] = useState(2);
   const heatmapEntitiesRef = useRef<Entity[]>([]);
   const routeLineEntitiesRef = useRef<Entity[]>([]);
+  // #2 on-time performance (2026-09-06): every currently STOPPED_AT vehicle
+  // with a resolvable schedule match, recomputed each poll. Only meaningful
+  // for vehicles actually at a stop right now - "on time" isn't well-defined
+  // mid-route - and only for rows carrying stop_id, which only exists on
+  // data ingested since the pipeline change (see PROJECT_STATUS.md).
+  const [showOnTime, setShowOnTime] = useState(false);
+  const [onTimeEntries, setOnTimeEntries] = useState<OnTimeEntry[]>([]);
   const allRoutes = useMemo(() => {
     const routes = new Set<string>();
     for (const bus of busDataRef.current.values()) routes.add(bus.routeId);
@@ -448,6 +487,38 @@ export function CesiumView() {
       heatmapEntitiesRef.current = [];
     };
   }, [showHeatmap, heatmapCells, heatmapSensitivity]);
+
+  // #2 on-time performance: recomputed every poll while the panel is open.
+  // Deliberately scans every currently-active vehicle each time rather than
+  // caching between polls - the set of STOPPED_AT vehicles changes
+  // constantly, and schedule lookups are cheap in-memory object gets once
+  // the snapshot is loaded (no network cost after the first call).
+  useEffect(() => {
+    if (!showOnTime) {
+      setOnTimeEntries([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const entries: OnTimeEntry[] = [];
+      for (const bus of busDataRef.current.values()) {
+        if (bus.status !== 'STOPPED_AT' || !bus.stopId) continue;
+        const scheduled = await getScheduledArrival(bus.tripId, bus.stopId);
+        if (scheduled == null) continue;
+        const punctuality = computePunctuality(scheduled, secondsSinceMidnightOf(new Date(bus.ts)));
+        entries.push({ vehicleId: bus.id, routeId: bus.routeId, stopId: bus.stopId, punctuality });
+      }
+      if (!cancelled) {
+        entries.sort((a, b) => b.punctuality.delayMinutes - a.punctuality.delayMinutes);
+        setOnTimeEntries(entries);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // busDataRef is a ref (no lint complaint about it as a missing dep);
+    // pollTick is the actual trigger for recomputing this each poll.
+  }, [showOnTime, pollTick]);
 
   // Draw the actual route line(s) as a visible overlay (2026-09-05, Ross's
   // ask) - a direct visual answer to "are vehicles actually locked to their
@@ -1000,6 +1071,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowOnTime(false);
             setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -1019,6 +1091,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowOnTime(false);
             setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -1037,6 +1110,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowOnTime(false);
             toggleNearMe();
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
@@ -1056,6 +1130,7 @@ export function CesiumView() {
             if (nearMeActive) toggleNearMe();
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowOnTime(false);
             setFilterType('all');
             setShowRoutesList(true);
           }}
@@ -1076,6 +1151,7 @@ export function CesiumView() {
             setShowRoutesList(false);
             setRouteFilter(null);
             setShowHeatmap(false);
+            setShowOnTime(false);
             setFilterType('all');
             setShowBunching(true);
           }}
@@ -1096,6 +1172,7 @@ export function CesiumView() {
             setShowRoutesList(false);
             setRouteFilter(null);
             setShowBunching(false);
+            setShowOnTime(false);
             setFilterType('all');
             setShowHeatmap(true);
           }}
@@ -1105,6 +1182,27 @@ export function CesiumView() {
         >
           <span aria-hidden>🔥</span>
           {heatmapLoading ? 'Loading…' : 'Heat map'}
+        </button>
+        <button
+          onClick={() => {
+            if (showOnTime) {
+              setShowOnTime(false);
+              return;
+            }
+            if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
+            setShowBunching(false);
+            setShowHeatmap(false);
+            setFilterType('all');
+            setShowOnTime(true);
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
+            showOnTime ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+          }`}
+        >
+          <span aria-hidden>⏱</span>
+          On-time
         </button>
       </div>
       {showHeatmap && (
@@ -1353,6 +1451,47 @@ export function CesiumView() {
                 </span>
                 <span className="text-xs text-amber-600 font-medium shrink-0">
                   {formatDistance(alert.gapMeters)} apart
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+      {/* #2 on-time performance (2026-09-06): every currently STOPPED_AT
+          vehicle with a resolvable schedule match. Empty until stop_id
+          starts landing on live rows - see PROJECT_STATUS.md for the
+          pipeline-side status of that. */}
+      {showOnTime && (
+        <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          {onTimeEntries.length === 0 ? (
+            <div className="px-3 py-2 text-gray-400">
+              No stopped vehicles with a schedule match right now
+            </div>
+          ) : (
+            onTimeEntries.map((entry) => (
+              <button
+                key={entry.vehicleId}
+                onClick={() => {
+                  setSelectedId(entry.vehicleId);
+                  const entity = entitiesRef.current.get(entry.vehicleId);
+                  const viewer = viewerRef.current;
+                  if (entity && viewer) void viewer.flyTo(entity);
+                }}
+                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+              >
+                <span className="font-medium text-gray-700">
+                  Route {entry.routeId}: {entry.vehicleId}
+                </span>
+                <span
+                  className={`text-xs font-medium shrink-0 ${
+                    Math.abs(entry.punctuality.delayMinutes) < 2
+                      ? 'text-green-600'
+                      : entry.punctuality.delayMinutes > 0
+                        ? 'text-red-600'
+                        : 'text-blue-600'
+                  }`}
+                >
+                  {entry.punctuality.label}
                 </span>
               </button>
             ))
