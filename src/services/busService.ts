@@ -9,6 +9,12 @@ export interface BusPosition {
   bearing: number;
   status: string;
   ts: number;
+  /**
+   * Which stop the vehicle is at/approaching, when known - powers #2
+   * on-time performance. Only populated for rows ingested since 2026-09-06
+   * (when this column was added); older/never-set rows come back as ''.
+   */
+  stopId: string;
 }
 
 export interface BusFeed {
@@ -25,7 +31,7 @@ EventSchemaBUS_v1
 | extend ts = todatetime(timestamp)
 | summarize arg_max(ts, *) by vehicle_id
 | where ts > now() - ${ACTIVE_WINDOW}
-| project vehicle_id, route_id, trip_id, latitude, longitude, bearing, current_status, ts
+| project vehicle_id, route_id, trip_id, latitude, longitude, bearing, current_status, stop_id, ts
 `;
 
 /** Fetch the latest position of every currently-active bus/light rail vehicle. */
@@ -38,6 +44,7 @@ export async function fetchBuses(signal?: AbortSignal): Promise<BusFeed> {
   const iLon = colIndex(t, 'longitude');
   const iBearing = colIndex(t, 'bearing');
   const iStatus = colIndex(t, 'current_status');
+  const iStopId = colIndex(t, 'stop_id');
   const iTs = colIndex(t, 'ts');
   const buses = t.Rows.map((r) => ({
     id: String(r[iId]),
@@ -47,6 +54,7 @@ export async function fetchBuses(signal?: AbortSignal): Promise<BusFeed> {
     lon: Number(r[iLon]),
     bearing: Number(r[iBearing]),
     status: r[iStatus] == null ? '' : String(r[iStatus]),
+    stopId: r[iStopId] == null ? '' : String(r[iStopId]),
     ts: new Date(String(r[iTs])).getTime(),
   })).filter((b) => Number.isFinite(b.lat) && Number.isFinite(b.lon));
   return { asOf: new Date().toISOString(), buses };
