@@ -44,6 +44,7 @@ import {
   haversineMeters,
   preloadShapes,
   shapeOrigin,
+  type ShapePoint,
   snapToShape,
 } from '@/services/shapeService';
 import {
@@ -53,6 +54,7 @@ import {
   getNearestStopName,
   getNearestStops,
   getScheduledArrival,
+  getStopName,
   minutesUntil,
   type NearestStop,
   preloadStopArrivals,
@@ -133,10 +135,15 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
   // since the pipeline change, so older-looking vehicles simply won't have
   // one yet even while STOPPED_AT.
   const [punctuality, setPunctuality] = useState<Punctuality | null>(null);
+  const [stopName, setStopName] = useState<string | null>(null);
   useEffect(() => {
     setPunctuality(null);
+    setStopName(null);
     if (bus.status !== 'STOPPED_AT' || !bus.stopId) return;
     let cancelled = false;
+    void getStopName(bus.stopId).then((name) => {
+      if (!cancelled) setStopName(name);
+    });
     void getScheduledArrival(bus.tripId, bus.stopId).then((scheduledSeconds) => {
       if (cancelled || scheduledSeconds == null) return;
       setPunctuality(computePunctuality(scheduledSeconds, secondsSinceMidnightOf(new Date(bus.ts))));
@@ -155,6 +162,7 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
     ['Position', `${bus.lat.toFixed(5)}, ${bus.lon.toFixed(5)}`],
     ['Last update', new Date(bus.ts).toLocaleTimeString()],
   ];
+  if (stopName) rows.push(['At stop', stopName]);
   if (punctuality) rows.push(['Punctuality', punctuality.label]);
   // A bottom bar rather than a tall left-side panel (2026-09-05, Ross's
   // ask) - the left side is where the Bus/Rail/Routes/etc. lists live, and
@@ -333,9 +341,12 @@ export function CesiumView() {
   const [heatmapLoading, setHeatmapLoading] = useState(false);
   // Exponent applied to each cell's relative intensity before colouring -
   // see the rendering effect below for why this needs to be user-adjustable
-  // rather than a fixed constant. 1 = linear (the original, too-sensitive
-  // behaviour); higher values push more of the scale toward cold.
-  const [heatmapSensitivity, setHeatmapSensitivity] = useState(2);
+  // rather than a fixed constant. 1 = linear; higher values push more of
+  // the scale toward cold. Default 1 (was 2) now that the reference point
+  // itself is the 90th percentile of busy cells, not the single absolute
+  // max - most of the skew-handling now happens there, so a neutral
+  // starting point makes more sense than pre-emptively compressing again.
+  const [heatmapSensitivity, setHeatmapSensitivity] = useState(1);
   const heatmapEntitiesRef = useRef<Entity[]>([]);
   const routeLineEntitiesRef = useRef<Entity[]>([]);
   // #2 on-time performance (2026-09-06): every currently STOPPED_AT vehicle
@@ -345,6 +356,18 @@ export function CesiumView() {
   // data ingested since the pipeline change (see PROJECT_STATUS.md).
   const [showOnTime, setShowOnTime] = useState(false);
   const [onTimeEntries, setOnTimeEntries] = useState<OnTimeEntry[]>([]);
+  // Summary stat (2026-09-07, Ross's ask) - a single stopped vehicle's
+  // punctuality isn't network-level information; the median plus the
+  // min/max range across every currently-matched vehicle is. Median rather
+  // than mean since a handful of very early/very late outliers shouldn't
+  // drag a "typical" figure around.
+  const onTimeSummary = useMemo(() => {
+    if (onTimeEntries.length === 0) return null;
+    const sorted = onTimeEntries.map((e) => e.punctuality.delayMinutes).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+    return { median, min: sorted[0], max: sorted[sorted.length - 1], n: sorted.length };
+  }, [onTimeEntries]);
   const allRoutes = useMemo(() => {
     const routes = new Set<string>();
     for (const bus of busDataRef.current.values()) routes.add(bus.routeId);
@@ -441,6 +464,17 @@ export function CesiumView() {
   // 0-1 relative intensity before mapping to color: >1 compresses low/mid
   // values toward cold and reserves red for only the genuinely highest
   // cells ("ultra-high" per Ross), 1 is the original linear behaviour.
+  //
+  // 2026-09-07 fix: scaling against the single busiest cell (the original
+  // approach) breaks badly once ~2500 zero/low-traffic stop cells are
+  // unioned in alongside a handful of genuinely mega-busy interchange
+  // cells - that's an extremely skewed (long-tail) distribution, and a
+  // linear-or-power ratio against the one absolute max crushes nearly
+  // everything toward one end (Ross: "either red or blue, often all
+  // blue"), since almost every real cell sits far below that one outlier.
+  // Scaling against the 90th percentile of *non-zero* cells instead (any
+  // cell at/above that point just reads as fully hot) keeps one freak busy
+  // stop from flattening the whole map's dynamic range.
   function heatColor(intensity: number): Color {
     if (intensity <= 0.5) {
       return Color.lerp(
@@ -463,9 +497,16 @@ export function CesiumView() {
     for (const entity of heatmapEntitiesRef.current) viewer.entities.remove(entity);
     heatmapEntitiesRef.current = [];
     if (!showHeatmap || heatmapCells.length === 0) return;
-    const maxCount = Math.max(...heatmapCells.map((c) => c.count));
+    const sortedNonZero = heatmapCells
+      .map((c) => c.count)
+      .filter((c) => c > 0)
+      .sort((a, b) => a - b);
+    const referenceMax =
+      sortedNonZero.length > 0
+        ? sortedNonZero[Math.floor(sortedNonZero.length * 0.9)]
+        : 1;
     heatmapEntitiesRef.current = heatmapCells.map((cell) => {
-      const raw = maxCount > 0 ? cell.count / maxCount : 0;
+      const raw = referenceMax > 0 ? Math.min(1, cell.count / referenceMax) : 0;
       const intensity = Math.pow(raw, heatmapSensitivity);
       const color = heatColor(intensity).withAlpha(0.15 + 0.55 * intensity);
       return viewer.entities.add({
@@ -681,6 +722,13 @@ export function CesiumView() {
   const [nextBusStopId, setNextBusStopId] = useState<string | null>(null);
   const [nextBusRows, setNextBusRows] = useState<NextBusRow[]>([]);
   const TERMINUS_THRESHOLD_METERS = 300;
+  // A vehicle already past the stop along its own route isn't "next" for
+  // that stop, no matter how physically close it now is (2026-09-07, Ross:
+  // "showing the bus that has passed and is continuing on its route" - it
+  // was picking nearest by straight-line distance alone, with no concept
+  // of before/after). A small tolerance absorbs snapping noise right at
+  // the stop itself rather than flickering a vehicle in/out as "passed".
+  const PASSED_TOLERANCE_METERS = 50;
   useEffect(() => {
     const stop = nextBusStopId ? nearestStops.find((s) => s.stopId === nextBusStopId) : undefined;
     if (!stop) {
@@ -691,35 +739,36 @@ export function CesiumView() {
     void (async () => {
       const rows: NextBusRow[] = [];
       for (const route of stop.routes) {
-        let nearest: BusPosition | null = null;
-        let nearestDist = Infinity;
+        // Per-shape, not per-route: two vehicles nominally on "the same
+        // route" can be on different shapes (opposite directions/patterns),
+        // and the stop's own position along the route only makes sense
+        // measured on the specific shape a given candidate is actually on.
+        let best: { bus: BusPosition; shape: ShapePoint[]; distanceAlong: number } | null = null;
         for (const bus of busDataRef.current.values()) {
           if (bus.routeId !== route.routeId) continue;
-          const d = haversineMeters(bus.lat, bus.lon, stop.lat, stop.lon);
-          if (d < nearestDist) {
-            nearestDist = d;
-            nearest = bus;
-          }
+          const shape = await getShapeForTrip(bus.tripId);
+          if (!shape) continue;
+          const stopHere = snapToShape(shape, stop.lat, stop.lon).distanceAlong;
+          const busHere = snapToShape(shape, bus.lat, bus.lon).distanceAlong;
+          if (busHere > stopHere + PASSED_TOLERANCE_METERS) continue; // already gone past - not "next" for this stop
+          if (!best || busHere > best.distanceAlong) best = { bus, shape, distanceAlong: busHere };
         }
-        if (!nearest) continue; // no vehicle at all on this route - do nothing for it
-        let atTerminus = false;
+        if (!best) continue; // every vehicle on this route/shape has already passed, or none active - do nothing
+        const { bus: nearest, shape } = best;
+        const atTerminus = best.distanceAlong <= TERMINUS_THRESHOLD_METERS;
         let directionLabel: string | null = null;
-        const shape = await getShapeForTrip(nearest.tripId);
-        if (shape) {
-          atTerminus = snapToShape(shape, nearest.lat, nearest.lon).distanceAlong <= TERMINUS_THRESHOLD_METERS;
-          const origin = shapeOrigin(shape);
-          const [originName, headsign] = await Promise.all([
-            origin ? getNearestStopName(origin.lat, origin.lon) : Promise.resolve(null),
-            getHeadsignForTrip(nearest.tripId),
-          ]);
-          if (originName && headsign) directionLabel = `${originName} to ${headsign} (${route.routeId})`;
-        }
+        const origin = shapeOrigin(shape);
+        const [originName, headsign] = await Promise.all([
+          origin ? getNearestStopName(origin.lat, origin.lon) : Promise.resolve(null),
+          getHeadsignForTrip(nearest.tripId),
+        ]);
+        if (originName && headsign) directionLabel = `${originName} to ${headsign} (${route.routeId})`;
         const currentLocationName = await getNearestStopName(nearest.lat, nearest.lon);
         rows.push({
           routeId: route.routeId,
           vehicleId: nearest.id,
           atTerminus,
-          distanceMeters: nearestDist,
+          distanceMeters: haversineMeters(nearest.lat, nearest.lon, stop.lat, stop.lon),
           directionLabel,
           currentLocationName,
         });
@@ -1462,7 +1511,33 @@ export function CesiumView() {
           starts landing on live rows - see PROJECT_STATUS.md for the
           pipeline-side status of that. */}
       {showOnTime && (
-        <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          {onTimeSummary && (
+            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+              <div className="text-[11px] uppercase tracking-wide text-gray-400">
+                Network median (n={onTimeSummary.n})
+              </div>
+              <div className="flex items-baseline justify-between">
+                <span
+                  className={`text-lg font-semibold ${
+                    Math.abs(onTimeSummary.median) < 2
+                      ? 'text-green-600'
+                      : onTimeSummary.median > 0
+                        ? 'text-red-600'
+                        : 'text-blue-600'
+                  }`}
+                >
+                  {onTimeSummary.median > 0 ? '+' : ''}
+                  {onTimeSummary.median}m
+                </span>
+                <span className="text-xs text-gray-400">
+                  range {onTimeSummary.min > 0 ? '+' : ''}
+                  {onTimeSummary.min}m to {onTimeSummary.max > 0 ? '+' : ''}
+                  {onTimeSummary.max}m
+                </span>
+              </div>
+            </div>
+          )}
           {onTimeEntries.length === 0 ? (
             <div className="px-3 py-2 text-gray-400">
               No stopped vehicles with a schedule match right now

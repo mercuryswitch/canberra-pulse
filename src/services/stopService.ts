@@ -127,6 +127,12 @@ export async function getNearestStopName(lat: number, lon: number): Promise<stri
   return bestName;
 }
 
+/** Exact stop_id -> name, e.g. for showing "Dickson Interchange" on a vehicle that's reported it's stopped at stop_id 1234. Direct lookup, not the nearest-neighbour geometry used by getNearestStopName. */
+export async function getStopName(stopId: string): Promise<string | null> {
+  const snap = await loadSnapshot();
+  return snap?.stops[stopId]?.[2] ?? null;
+}
+
 /** Nearest `count` stops to (lat, lon), each with today's remaining scheduled arrivals per route. */
 export async function getNearestStops(lat: number, lon: number, count = 3): Promise<NearestStop[]> {
   const snap = await loadSnapshot();
