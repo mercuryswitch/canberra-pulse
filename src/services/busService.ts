@@ -81,8 +81,13 @@ export interface HeatmapCell {
 // service") - acceptable for a first pass, worth refining later if the
 // heat map ever needs to distinguish idling from throughput.
 const HEATMAP_WINDOW = '1d';
-/** Exported so the renderer draws cells the exact size the query actually binned. */
-export const HEATMAP_GRID_DEGREES = 0.005;
+/**
+ * Exported so the renderer draws cells the exact size the query actually
+ * binned. 0.0025 deg is ~230-280m at Canberra's latitude (was 0.005, ~450-
+ * 560m) - Ross's ask 2026-09-07 for finer granularity so the gradient
+ * spreads more evenly rather than a small number of coarse blocks.
+ */
+export const HEATMAP_GRID_DEGREES = 0.0025;
 
 const HEATMAP_KQL = `
 EventSchemaBUS_v1
