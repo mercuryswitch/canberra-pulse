@@ -339,13 +339,16 @@ export function CesiumView() {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [heatmapCells, setHeatmapCells] = useState<HeatmapCell[]>([]);
   const [heatmapLoading, setHeatmapLoading] = useState(false);
-  // Exponent applied to each cell's relative intensity before colouring -
-  // see the rendering effect below for why this needs to be user-adjustable
-  // rather than a fixed constant. 1 = linear; higher values push more of
-  // the scale toward cold. Default 1 (was 2) now that the reference point
-  // itself is the 90th percentile of busy cells, not the single absolute
-  // max - most of the skew-handling now happens there, so a neutral
-  // starting point makes more sense than pre-emptively compressing again.
+  // Boost applied to each cell's relative intensity before colouring - see
+  // the rendering effect below. 1 = linear; higher values pull mid/low
+  // values UP toward the hot end (any cell with real traffic, however
+  // little, reads as more prominent), while genuinely zero-count cells
+  // stay exactly at zero regardless (0 raised to any power is still 0) -
+  // so "no traffic at all" stays visually distinct even at high boost.
+  // 2026-09-07 (Ross): after the percentile fix, the map was too binary -
+  // pale blue or dark red with barely any transition - so this needed to
+  // let more of the low/mid range show up as warm, not be compressed
+  // further toward cold as the original (inverse) exponent direction did.
   const [heatmapSensitivity, setHeatmapSensitivity] = useState(1);
   const heatmapEntitiesRef = useRef<Entity[]>([]);
   const routeLineEntitiesRef = useRef<Entity[]>([]);
@@ -475,6 +478,8 @@ export function CesiumView() {
   // Scaling against the 90th percentile of *non-zero* cells instead (any
   // cell at/above that point just reads as fully hot) keeps one freak busy
   // stop from flattening the whole map's dynamic range.
+  // Darker red top end (was #D32F2F) per Ross's ask 2026-09-07 for a more
+  // dramatic hot end once cells actually reach it.
   function heatColor(intensity: number): Color {
     if (intensity <= 0.5) {
       return Color.lerp(
@@ -486,7 +491,7 @@ export function CesiumView() {
     }
     return Color.lerp(
       Color.fromCssColorString('#FFF59D'),
-      Color.fromCssColorString('#D32F2F'),
+      Color.fromCssColorString('#8B0000'),
       (intensity - 0.5) * 2,
       new Color(),
     );
@@ -507,7 +512,7 @@ export function CesiumView() {
         : 1;
     heatmapEntitiesRef.current = heatmapCells.map((cell) => {
       const raw = referenceMax > 0 ? Math.min(1, cell.count / referenceMax) : 0;
-      const intensity = Math.pow(raw, heatmapSensitivity);
+      const intensity = Math.pow(raw, 1 / heatmapSensitivity);
       const color = heatColor(intensity).withAlpha(0.15 + 0.55 * intensity);
       return viewer.entities.add({
         rectangle: {
@@ -743,9 +748,25 @@ export function CesiumView() {
         // route" can be on different shapes (opposite directions/patterns),
         // and the stop's own position along the route only makes sense
         // measured on the specific shape a given candidate is actually on.
+        //
+        // route_id alone isn't enough to pick candidates, though (2026-09-07,
+        // Ross: opposite-side stops on the same route both showed the same
+        // direction - e.g. Madigan St opp Hackett Shops showing "to Dickson"
+        // when it should show "to National Museum"). A route can run both
+        // directions, and a candidate merely being geometrically close to
+        // this stop doesn't mean its own trip actually serves it - the two
+        // directions' shapes run along nearly the same physical road, just
+        // reversed, so a wrong-direction vehicle can still look "not yet
+        // passed" against this stop's coordinates snapped onto its shape.
+        // Confirming the exact trip_id+stop_id pair has a real scheduled
+        // arrival (reusing #2's per-trip schedule data) proves this specific
+        // trip genuinely visits this specific stop, not just the same route
+        // number in the other direction.
         let best: { bus: BusPosition; shape: ShapePoint[]; distanceAlong: number } | null = null;
         for (const bus of busDataRef.current.values()) {
           if (bus.routeId !== route.routeId) continue;
+          const scheduledHere = await getScheduledArrival(bus.tripId, stop.stopId);
+          if (scheduledHere == null) continue; // this trip doesn't actually serve this stop - wrong direction
           const shape = await getShapeForTrip(bus.tripId);
           if (!shape) continue;
           const stopHere = snapToShape(shape, stop.lat, stop.lon).distanceAlong;
@@ -1272,13 +1293,13 @@ export function CesiumView() {
             <input
               type="range"
               min={1}
-              max={5}
-              step={0.5}
+              max={50}
+              step={1}
               value={heatmapSensitivity}
               onChange={(e) => setHeatmapSensitivity(Number(e.target.value))}
               className="flex-1"
             />
-            <span className="text-gray-400 w-6 text-right">{heatmapSensitivity}</span>
+            <span className="text-gray-400 w-8 text-right">{heatmapSensitivity}</span>
           </div>
         </div>
       )}
