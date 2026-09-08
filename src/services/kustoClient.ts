@@ -171,7 +171,17 @@ let redirectResult: AuthenticationResult | null = null;
  * like a normal browser SPA. `createNestablePublicClientApplication` resolves
  * only after the instance is initialized.
  */
-async function ensureMsalInitialized(): Promise<IPublicClientApplication> {
+// Exported (2026-09-08) so other Entra-authenticated services - currently
+// fabricJobsService.ts, for the "trigger ACTBusEventLoader" button - reuse
+// this exact same MSAL instance and signed-in account rather than standing
+// up a second PublicClientApplication for the same clientId, which risks
+// duplicate event listeners/redirect handling for no benefit. Kusto access
+// stays the only thing that needs the full NAA/storage-access/popup
+// fallback chain below (a constantly-polled live feed, embeddable in the
+// Fabric portal) - an occasional, user-clicked admin action like triggering
+// a notebook run can just do plain silent-then-popup against the same
+// instance, no need to duplicate that whole saga for a second scope.
+export async function ensureMsalInitialized(): Promise<IPublicClientApplication> {
   if (!CLIENT_ID) throw new Error('VITE_ENTRA_CLIENT_ID is not configured.');
   const clientId = CLIENT_ID;
   if (!msalReady) {
