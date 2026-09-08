@@ -8,6 +8,7 @@
 
 export interface PopulationCell {
   sa1Code: string;
+  areaName: string;
   population: number;
   areaSqKm: number;
   centroidLat: number;
