@@ -7,6 +7,7 @@ import cesium from 'vite-plugin-cesium';
 import { populationSnapshotPlugin } from './vite/populationSnapshot';
 import { routeShapesSnapshotPlugin } from './vite/routeShapesSnapshot';
 import { stopArrivalsSnapshotPlugin } from './vite/stopArrivalsSnapshot';
+import { trafficLinksSnapshotPlugin } from './vite/trafficLinksSnapshot';
 
 export default defineConfig(({ mode }) => {
   // Pin the dev server to Rayfin's per-project port (VITE_PORT, mapped from
@@ -23,6 +24,7 @@ export default defineConfig(({ mode }) => {
       routeShapesSnapshotPlugin(),
       stopArrivalsSnapshotPlugin(),
       populationSnapshotPlugin(),
+      trafficLinksSnapshotPlugin(),
     ],
     resolve: {
       alias: {

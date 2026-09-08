@@ -66,6 +66,13 @@ import {
   secondsSinceMidnightOf,
   type TripStop,
 } from '@/services/stopService';
+import {
+  fetchLiveLinkStats,
+  getTrafficLinks,
+  preloadTrafficLinks,
+  type TrafficLink,
+  type TrafficLinkLiveStats,
+} from '@/services/trafficService';
 
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
 // Google Photorealistic 3D Tiles. Without it we fall back to keyless
@@ -141,6 +148,8 @@ interface OnTimeEntry {
   routeId: string;
   stopId: string;
   punctuality: Punctuality;
+  lat: number;
+  lon: number;
 }
 
 function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void }) {
@@ -396,6 +405,17 @@ export function CesiumView() {
   const [populationCells, setPopulationCells] = useState<PopulationCell[]>([]);
   const [equityLoading, setEquityLoading] = useState(false);
   const equityEntitiesRef = useRef<Entity[]>([]);
+  // Road congestion overlay (2026-09-08, Ross's find: ACT's public
+  // Addinsight Bluetooth-detector traffic API - real per-road-segment
+  // speed/delay/congestion, refreshed roughly every 1-5 minutes). Same
+  // split as the population overlay: static road geometry loaded once,
+  // live stats (from the ACTTrafficLoader notebook, via Kusto) refreshed
+  // like any other live layer.
+  const [showCongestion, setShowCongestion] = useState(false);
+  const [trafficLinks, setTrafficLinks] = useState<TrafficLink[]>([]);
+  const [linkStats, setLinkStats] = useState<Map<number, TrafficLinkLiveStats>>(new Map());
+  const [congestionLoading, setCongestionLoading] = useState(false);
+  const congestionEntitiesRef = useRef<Entity[]>([]);
   // Boost applied to each cell's relative intensity before colouring - see
   // the rendering effect below. 1 = linear; higher values pull mid/low
   // values UP toward the hot end (any cell with real traffic, however
@@ -570,6 +590,49 @@ export function CesiumView() {
     };
   }, [showEquity]);
 
+  // Road geometry doesn't change often - fetch once, when first needed.
+  // Also loaded for the on-time panel, not just the Congestion map layer
+  // itself (2026-09-08, Ross's ask: "use the congestion to measure latency
+  // of busses") - the two are independent, mutually-exclusive toggles, but
+  // the on-time list's nearby-congestion correlation below needs this data
+  // whether or not the congestion layer is actually being displayed.
+  useEffect(() => {
+    if (!showCongestion && !showOnTime) return;
+    let cancelled = false;
+    void preloadTrafficLinks()
+      .then(() => getTrafficLinks())
+      .then((links) => {
+        if (!cancelled) setTrafficLinks(links);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showCongestion, showOnTime]);
+
+  // Live stats refresh every poll while either panel is open, same cadence
+  // as the rest of the live app - unlike the heat map's 24h-history query,
+  // this is a genuinely live layer (stats go stale within a few minutes).
+  useEffect(() => {
+    if (!showCongestion && !showOnTime) {
+      setLinkStats(new Map());
+      return;
+    }
+    let cancelled = false;
+    setCongestionLoading(true);
+    const controller = new AbortController();
+    void fetchLiveLinkStats(controller.signal)
+      .then((stats) => {
+        if (!cancelled) setLinkStats(stats);
+      })
+      .finally(() => {
+        if (!cancelled) setCongestionLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [showCongestion, showOnTime, pollTick]);
+
   // Percentile RANK (position in sorted order, not value-relative-to-a-
   // reference) for each entry - deliberately robust to skew, unlike a
   // percentage-of-max approach, since population density and heat-map
@@ -660,6 +723,124 @@ export function CesiumView() {
       equityEntitiesRef.current = [];
     };
   }, [equityRanking]);
+
+  // Traffic-light color scale (green -> amber -> red), matching the 0-7
+  // score from link_scores.json - deliberately a different palette from
+  // heatColor's blue-yellow-red, since "green = free-flowing" is the
+  // universally understood convention for road congestion specifically,
+  // where blue would read as meaningless here.
+  function congestionColor(score: number): Color {
+    const t = Math.max(0, Math.min(1, score / 7));
+    if (t <= 0.5) {
+      return Color.lerp(
+        Color.fromCssColorString('#22c55e'),
+        Color.fromCssColorString('#eab308'),
+        t * 2,
+        new Color(),
+      );
+    }
+    return Color.lerp(
+      Color.fromCssColorString('#eab308'),
+      Color.fromCssColorString('#dc2626'),
+      (t - 0.5) * 2,
+      new Color(),
+    );
+  }
+
+  // Only links with a current live reading get drawn or ranked - a link
+  // the loader hasn't reported on yet (or before ACTTrafficLoader has ever
+  // run) is left out entirely rather than shown as a misleading "0
+  // congestion" default, same "say nothing rather than guess" convention
+  // as the heat map's blank-vs-blue distinction.
+  const congestionRanking = useMemo(() => {
+    if ((!showCongestion && !showOnTime) || trafficLinks.length === 0) return [];
+    const withStats: { link: TrafficLink; stats: TrafficLinkLiveStats }[] = [];
+    for (const link of trafficLinks) {
+      const stats = linkStats.get(link.linkId);
+      if (stats) withStats.push({ link, stats });
+    }
+    return withStats;
+  }, [showCongestion, showOnTime, trafficLinks, linkStats]);
+
+  const CONGESTION_LIST_SIZE = 8;
+  const congestionLists = useMemo(() => {
+    if (congestionRanking.length === 0) return { mostCongested: [], closed: [] };
+    const sorted = [...congestionRanking].sort((a, b) => b.stats.score - a.stats.score);
+    return {
+      mostCongested: sorted.filter((r) => !r.stats.closed).slice(0, CONGESTION_LIST_SIZE),
+      closed: sorted.filter((r) => r.stats.closed),
+    };
+  }, [congestionRanking]);
+
+  // "Use the congestion to measure latency of busses" (2026-09-08, Ross's
+  // ask) - the actual correlation: for each currently-late/early/on-time
+  // vehicle, find the nearest road segment with a live reading and show
+  // its congestion score alongside the punctuality figure. Nearest-vertex
+  // search (not full segment projection like snapToShape) - road segment
+  // polylines are dense enough in practice that the difference is a few
+  // metres, not worth the extra complexity for a categorical "is the
+  // nearby road congested" signal rather than a precise measurement.
+  // Ideas for taking this further, not yet built: (1) aggregate congestion
+  // along a vehicle's *whole remaining route* rather than just its current
+  // position, so "5 min late" can be explained by "the road ahead is
+  // congested" specifically, not just "somewhere nearby is"; (2) a
+  // network-wide congestion stat correlated against the on-time median
+  // over time, to distinguish "the whole network is running behind today"
+  // from "this one route has its own problem"; (3) flag routes whose
+  // shapes cross the same congested links repeatedly as structurally
+  // exposed to traffic, a genuine "should this route get bus priority
+  // lanes" signal for the chief-minister framing.
+  const CONGESTION_NEARBY_RADIUS_METERS = 250;
+  function nearestCongestionLink(
+    lat: number,
+    lon: number,
+  ): { link: TrafficLink; stats: TrafficLinkLiveStats; distanceMeters: number } | null {
+    let best: { link: TrafficLink; stats: TrafficLinkLiveStats; distanceMeters: number } | null = null;
+    for (const { link, stats } of congestionRanking) {
+      for (const [plat, plon] of link.polyline) {
+        const d = haversineMeters(lat, lon, plat, plon);
+        if (!best || d < best.distanceMeters) best = { link, stats, distanceMeters: d };
+      }
+    }
+    return best && best.distanceMeters <= CONGESTION_NEARBY_RADIUS_METERS ? best : null;
+  }
+  const onTimeWithCongestion = useMemo(
+    () => onTimeEntries.map((entry) => ({ ...entry, nearby: nearestCongestionLink(entry.lat, entry.lon) })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- nearestCongestionLink closes over congestionRanking, which is already a dependency here.
+    [onTimeEntries, congestionRanking],
+  );
+
+  // Draw each road segment as a colored polyline - a closed link is drawn
+  // as a flat dark red regardless of its last score (a road that's
+  // genuinely closed isn't "score 3 congested", it's a different kind of
+  // fact entirely and shouldn't be color-scaled the same way).
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    for (const entity of congestionEntitiesRef.current) viewer.entities.remove(entity);
+    congestionEntitiesRef.current = [];
+    // congestionRanking is also populated for the on-time panel's nearby-
+    // congestion correlation, independent of this map layer's own toggle -
+    // only actually draw the roads when Congestion itself is switched on.
+    if (!showCongestion || congestionRanking.length === 0) return;
+
+    congestionEntitiesRef.current = congestionRanking.map(({ link, stats }) => {
+      const color = stats.closed ? Color.fromCssColorString('#7f1d1d') : congestionColor(stats.score);
+      const positions = link.polyline.flatMap(([lat, lon]) => [lon, lat]);
+      return viewer.entities.add({
+        polyline: {
+          positions: Cartesian3.fromDegreesArray(positions),
+          width: stats.closed ? 6 : 3 + stats.score,
+          material: color.withAlpha(0.85),
+          clampToGround: true,
+        },
+      });
+    });
+    return () => {
+      for (const entity of congestionEntitiesRef.current) viewer.entities.remove(entity);
+      congestionEntitiesRef.current = [];
+    };
+  }, [congestionRanking, showCongestion]);
 
   // Draw the grid as translucent colored rectangles: blue (cold - a stop
   // exists here but little/no observed activity) through yellow to red
@@ -802,7 +983,14 @@ export function CesiumView() {
         const scheduled = await getScheduledArrival(bus.tripId, bus.stopId);
         if (scheduled == null) continue;
         const punctuality = computePunctuality(scheduled, secondsSinceMidnightOf(new Date(bus.ts)));
-        entries.push({ vehicleId: bus.id, routeId: bus.routeId, stopId: bus.stopId, punctuality });
+        entries.push({
+          vehicleId: bus.id,
+          routeId: bus.routeId,
+          stopId: bus.stopId,
+          punctuality,
+          lat: bus.lat,
+          lon: bus.lon,
+        });
       }
       if (!cancelled) {
         entries.sort((a, b) => b.punctuality.delayMinutes - a.punctuality.delayMinutes);
@@ -1605,6 +1793,7 @@ export function CesiumView() {
             setShowBunching(false);
             setShowHeatmap(false);
             setShowEquity(false);
+            setShowCongestion(false);
             setShowOnTime(false);
             setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
           }}
@@ -1626,6 +1815,7 @@ export function CesiumView() {
             setShowBunching(false);
             setShowHeatmap(false);
             setShowEquity(false);
+            setShowCongestion(false);
             setShowOnTime(false);
             setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
           }}
@@ -1646,6 +1836,7 @@ export function CesiumView() {
             setShowBunching(false);
             setShowHeatmap(false);
             setShowEquity(false);
+            setShowCongestion(false);
             setShowOnTime(false);
             toggleNearMe();
           }}
@@ -1667,6 +1858,7 @@ export function CesiumView() {
             setShowBunching(false);
             setShowHeatmap(false);
             setShowEquity(false);
+            setShowCongestion(false);
             setShowOnTime(false);
             setFilterType('all');
             setShowRoutesList(true);
@@ -1689,6 +1881,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowHeatmap(false);
             setShowEquity(false);
+            setShowCongestion(false);
             setShowOnTime(false);
             setFilterType('all');
             setShowBunching(true);
@@ -1733,6 +1926,7 @@ export function CesiumView() {
             setShowBunching(false);
             setShowHeatmap(false);
             setShowEquity(false);
+            setShowCongestion(false);
             setFilterType('all');
             setShowOnTime(true);
           }}
@@ -1755,6 +1949,7 @@ export function CesiumView() {
             setShowBunching(false);
             setShowHeatmap(false);
             setShowOnTime(false);
+            setShowCongestion(false);
             setFilterType('all');
             setShowEquity(true);
           }}
@@ -1764,6 +1959,29 @@ export function CesiumView() {
         >
           <span aria-hidden>🏘️</span>
           {equityLoading ? 'Loading…' : 'Equity'}
+        </button>
+        <button
+          onClick={() => {
+            if (showCongestion) {
+              setShowCongestion(false);
+              return;
+            }
+            if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
+            setShowBunching(false);
+            setShowHeatmap(false);
+            setShowOnTime(false);
+            setShowEquity(false);
+            setFilterType('all');
+            setShowCongestion(true);
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
+            showCongestion ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+          }`}
+        >
+          <span aria-hidden>🚦</span>
+          {congestionLoading ? 'Loading…' : 'Congestion'}
         </button>
       </div>
       {showHeatmap && (
@@ -1907,6 +2125,93 @@ export function CesiumView() {
               ))}
             </div>
           ))}
+        </div>
+      )}
+      {showCongestion && (
+        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
+          <div className="text-gray-600 font-medium">Live road congestion (Bluetooth detectors)</div>
+          <div
+            className="inline-block h-3 rounded"
+            style={{ background: 'linear-gradient(to right, #22c55e, #eab308, #dc2626)' }}
+          />
+          <div className="flex justify-between text-gray-400">
+            <span>free-flowing</span>
+            <span>severe (score 7)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-1.5 rounded" style={{ background: '#7f1d1d' }} />
+            <span className="text-gray-500">Closed</span>
+          </div>
+          <div className="text-gray-400 pt-1 border-t border-gray-100">
+            {congestionRanking.length > 0
+              ? `${congestionRanking.length} of ${trafficLinks.length} road segments reporting`
+              : trafficLinks.length > 0
+                ? 'No live stats yet - has ACTTrafficLoader been run recently?'
+                : 'Loading road network…'}
+          </div>
+        </div>
+      )}
+      {/* Ranked congestion list (2026-09-08, Ross's find: ACT's public
+          Bluetooth-detector traffic API) - same right-side list pattern as
+          heat map/equity. Named segments read far better than link IDs. */}
+      {showCongestion && (congestionLists.mostCongested.length > 0 || congestionLists.closed.length > 0) && (
+        <div className="absolute top-16 right-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          {congestionLists.closed.length > 0 && (
+            <div>
+              <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+                Closed right now
+              </div>
+              {congestionLists.closed.map(({ link }) => (
+                <button
+                  key={link.linkId}
+                  onClick={() => {
+                    const viewer = viewerRef.current;
+                    if (viewer && link.polyline.length > 0) {
+                      const [midLat, midLon] = link.polyline[Math.floor(link.polyline.length / 2)];
+                      void viewer.camera.flyTo({
+                        destination: Cartesian3.fromDegrees(midLon, midLat, 800),
+                        duration: 1.2,
+                      });
+                    }
+                  }}
+                  className="w-full px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0 text-red-800 font-medium truncate"
+                >
+                  {link.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <div>
+            <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+              Most congested
+            </div>
+            {congestionLists.mostCongested.map(({ link, stats }) => (
+              <button
+                key={link.linkId}
+                onClick={() => {
+                  const viewer = viewerRef.current;
+                  if (viewer && link.polyline.length > 0) {
+                    const [midLat, midLon] = link.polyline[Math.floor(link.polyline.length / 2)];
+                    void viewer.camera.flyTo({
+                      destination: Cartesian3.fromDegrees(midLon, midLat, 800),
+                      duration: 1.2,
+                    });
+                  }
+                }}
+                className="w-full flex flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+              >
+                <span className="truncate font-medium text-gray-700">{link.name}</span>
+                <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                  <span className="text-gray-400 shrink-0">
+                    {stats.speed} km/h · {stats.tt}s (free-flow {link.minTT}s)
+                  </span>
+                  <span className="shrink-0 font-medium" style={{ color: '#dc2626' }}>
+                    score {stats.score}
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       {/* "Near me for this bus" (2026-09-08): selecting a vehicle while Near
@@ -2225,12 +2530,12 @@ export function CesiumView() {
               </div>
             </div>
           )}
-          {onTimeEntries.length === 0 ? (
+          {onTimeWithCongestion.length === 0 ? (
             <div className="px-3 py-2 text-gray-400">
               No stopped vehicles with a schedule match right now
             </div>
           ) : (
-            onTimeEntries.map((entry) => (
+            onTimeWithCongestion.map((entry) => (
               <button
                 key={entry.vehicleId}
                 onClick={() => {
@@ -2239,22 +2544,35 @@ export function CesiumView() {
                   const viewer = viewerRef.current;
                   if (entity && viewer) void viewer.flyTo(entity);
                 }}
-                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                className="w-full flex flex-col gap-0.5 px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
               >
-                <span className="font-medium text-gray-700">
-                  Route {entry.routeId}: {entry.vehicleId}
-                </span>
-                <span
-                  className={`text-xs font-medium shrink-0 ${
-                    Math.abs(entry.punctuality.delayMinutes) < 2
-                      ? 'text-green-600'
-                      : entry.punctuality.delayMinutes > 0
-                        ? 'text-red-600'
-                        : 'text-blue-600'
-                  }`}
-                >
-                  {entry.punctuality.label}
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="font-medium text-gray-700">
+                    Route {entry.routeId}: {entry.vehicleId}
+                  </span>
+                  <span
+                    className={`text-xs font-medium shrink-0 ${
+                      Math.abs(entry.punctuality.delayMinutes) < 2
+                        ? 'text-green-600'
+                        : entry.punctuality.delayMinutes > 0
+                          ? 'text-red-600'
+                          : 'text-blue-600'
+                    }`}
+                  >
+                    {entry.punctuality.label}
+                  </span>
+                </div>
+                {/* Nearby road congestion (2026-09-08, Ross's ask: "use the
+                    congestion to measure latency of busses") - only shown
+                    when a road segment with a live reading is actually
+                    close by (see CONGESTION_NEARBY_RADIUS_METERS), so a
+                    vehicle with nothing nearby just shows nothing extra
+                    rather than a misleading "no congestion" default. */}
+                {entry.nearby && (
+                  <div className="text-[11px] text-gray-400 truncate">
+                    Nearby: {entry.nearby.link.name} · congestion score {entry.nearby.stats.score}
+                  </div>
+                )}
               </button>
             ))
           )}
