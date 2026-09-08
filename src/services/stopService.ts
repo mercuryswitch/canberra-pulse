@@ -213,6 +213,38 @@ export async function getScheduledArrival(tripId: string, stopId: string): Promi
   return snap?.tripStopArrival[tripId]?.[stopId] ?? null;
 }
 
+export interface TripStop {
+  stopId: string;
+  name: string;
+  lat: number;
+  lon: number;
+  /** Scheduled arrival, seconds since midnight. */
+  arrivalSeconds: number;
+}
+
+/**
+ * Every stop scheduled on this specific trip, in schedule order (by arrival
+ * time) - the full stop sequence for a live vehicle's own journey. Powers
+ * "near me for this bus" (2026-09-08): selecting a vehicle while Near Me is
+ * active shows the upcoming stops on *its* route instead of stops nearest
+ * your own location. Empty if the trip isn't in the static schedule (same
+ * fallback as getScheduledArrival/getShapeForTrip elsewhere).
+ */
+export async function getStopsForTrip(tripId: string): Promise<TripStop[]> {
+  const snap = await loadSnapshot();
+  if (!snap) return [];
+  const byStop = snap.tripStopArrival[tripId];
+  if (!byStop) return [];
+  const stops: TripStop[] = [];
+  for (const [stopId, arrivalSeconds] of Object.entries(byStop)) {
+    const info = snap.stops[stopId];
+    if (!info) continue;
+    const [lat, lon, name] = info;
+    stops.push({ stopId, name, lat, lon, arrivalSeconds });
+  }
+  return stops.sort((a, b) => a.arrivalSeconds - b.arrivalSeconds);
+}
+
 export interface Punctuality {
   /** Positive = late, negative = early, in whole minutes. */
   delayMinutes: number;
