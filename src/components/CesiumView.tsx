@@ -972,29 +972,43 @@ export function CesiumView() {
             lastTripIdRef.current.set(bus.id, bus.tripId);
           }
 
-          // A SampledPositionProperty holds real fixes over time and, with
-          // extrapolation on, keeps moving the entity along the last known
-          // velocity between polls instead of snapping every 8s. The moment
-          // a genuinely new real fix arrives (addSample below), it's ground
-          // truth again - no manual "fake vs real" reconciliation needed.
+          // A SampledPositionProperty holds real fixes over time. REVERSED
+          // 2026-09-08 (was EXTRAPOLATE): Ross caught it directly from a
+          // screenshot - the vehicle marker sitting off in open ground while
+          // the route line curved cleanly through the built-up area right
+          // next to it. Root cause: the browser's clock is always slightly
+          // ahead of the latest real sample (feed/network latency), so the
+          // *displayed* position is always in "past the last sample"
+          // territory - never genuinely interpolating between two real
+          // brackets. EXTRAPOLATE there means Cesium projects motion forward
+          // in a straight Cartesian line from the last known velocity -
+          // literally "as the crow flies" - with zero awareness of the
+          // route shape. Every earlier fix here (tracing real shape vertices
+          // between samples, anchoring the snap search to the vehicle's own
+          // last position) only improved the *historical* samples the
+          // extrapolation then flies straight past - it never touched what
+          // actually renders at any given instant.
+          //
+          // Ross's ask: "what's the closest point on that route that the
+          // current location matches" at each update, not a velocity-based
+          // guess in between. HOLD does exactly that - the displayed
+          // position is always the last real, route-snapped sample, full
+          // stop, until a genuinely new poll lands and it updates (via the
+          // real-vertex-tracing samples above, so that update itself still
+          // glides along the route rather than jumping). Trade-off, and a
+          // deliberate one per this feedback: motion is no longer perfectly
+          // continuous between polls - a vehicle visibly holds still for
+          // the last second or two before each update, rather than gliding
+          // on a guess. Duration 0 (not a timed cutoff) means hold
+          // indefinitely - matches the orientation property's own existing
+          // HOLD-forever pattern just below, and sidesteps the old
+          // "extrapolate past 5 minutes goes undefined" concern entirely
+          // (nothing to time out when it just holds).
           let sampledPosition = positionsRef.current.get(bus.id);
           if (!sampledPosition) {
             sampledPosition = new SampledPositionProperty();
-            // EXTRAPOLATE (not HOLD) so position keeps gliding smoothly
-            // between real fixes - the browser's clock is always slightly
-            // ahead of the latest real sample (feed/network latency), so
-            // we're *always* in "past the last sample" territory, never
-            // genuinely interpolating between two brackets. HOLD there
-            // means literally freezing until the next real sample lands,
-            // then snapping - which is what "movement lost, just snapping"
-            // was. Duration matches busService.ts's own 5-minute active
-            // window, so anything still considered active never goes
-            // *undefined* (the original light-rail-invisible bug) either -
-            // it just extrapolates further than usual on the rare vehicle
-            // that reports sparsely, which still looks like motion rather
-            // than nothing.
-            sampledPosition.forwardExtrapolationType = ExtrapolationType.EXTRAPOLATE;
-            sampledPosition.forwardExtrapolationDuration = 300;
+            sampledPosition.forwardExtrapolationType = ExtrapolationType.HOLD;
+            sampledPosition.forwardExtrapolationDuration = 0;
             sampledPosition.setInterpolationOptions({
               interpolationDegree: 1,
               interpolationAlgorithm: LinearApproximation,
