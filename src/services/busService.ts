@@ -129,11 +129,14 @@ export interface HeatmapCell {
 const HEATMAP_WINDOW = '1d';
 /**
  * Exported so the renderer draws cells the exact size the query actually
- * binned. 0.0025 deg is ~230-280m at Canberra's latitude (was 0.005, ~450-
- * 560m) - Ross's ask 2026-09-07 for finer granularity so the gradient
- * spreads more evenly rather than a small number of coarse blocks.
+ * binned. 0.0009 deg is ~80-100m at Canberra's latitude (was 0.0025,
+ * ~230-280m; before that 0.005, ~450-560m) - Ross's ask 2026-09-08 for
+ * ~100m cells. Lat/lon degrees don't cover equal ground (a degree of
+ * longitude shrinks with cos(latitude)), so cells are a touch narrower
+ * east-west than north-south rather than perfectly square - the same
+ * approximation this file has always used, just at a finer grid now.
  */
-export const HEATMAP_GRID_DEGREES = 0.0025;
+export const HEATMAP_GRID_DEGREES = 0.0009;
 
 const HEATMAP_KQL = `
 EventSchemaBUS_v1
