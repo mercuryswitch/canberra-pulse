@@ -4,6 +4,7 @@ import { resolve } from 'path';
 import { defineConfig, loadEnv } from 'vite';
 import cesium from 'vite-plugin-cesium';
 
+import { populationSnapshotPlugin } from './vite/populationSnapshot';
 import { routeShapesSnapshotPlugin } from './vite/routeShapesSnapshot';
 import { stopArrivalsSnapshotPlugin } from './vite/stopArrivalsSnapshot';
 
@@ -15,7 +16,14 @@ export default defineConfig(({ mode }) => {
   const port = env.VITE_PORT ? Number(env.VITE_PORT) : undefined;
 
   return {
-    plugins: [react(), tailwindcss(), cesium(), routeShapesSnapshotPlugin(), stopArrivalsSnapshotPlugin()],
+    plugins: [
+      react(),
+      tailwindcss(),
+      cesium(),
+      routeShapesSnapshotPlugin(),
+      stopArrivalsSnapshotPlugin(),
+      populationSnapshotPlugin(),
+    ],
     resolve: {
       alias: {
         '@': resolve(import.meta.dirname, 'src'),

@@ -35,6 +35,7 @@ import {
   type HeatmapCell,
 } from '@/services/busService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
+import { getPopulationCells, preloadPopulation, type PopulationCell } from '@/services/populationService';
 import {
   getHeadsignForTrip,
   getShapeById,
@@ -373,6 +374,15 @@ export function CesiumView() {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [heatmapCells, setHeatmapCells] = useState<HeatmapCell[]>([]);
   const [heatmapLoading, setHeatmapLoading] = useState(false);
+  // #4 equity overlay (2026-09-08): "how population is spread across the
+  // city, and where that doesn't match actual bus service." Shares the
+  // exact same heatmapCells data the heat map itself uses (see the fetch
+  // effect below, widened to trigger on either toggle) - this is a real
+  // correlation against the heat map, not a separate approximation of it.
+  const [showEquity, setShowEquity] = useState(false);
+  const [populationCells, setPopulationCells] = useState<PopulationCell[]>([]);
+  const [equityLoading, setEquityLoading] = useState(false);
+  const equityEntitiesRef = useRef<Entity[]>([]);
   // Boost applied to each cell's relative intensity before colouring - see
   // the rendering effect below. 1 = linear; higher values pull mid/low
   // values UP toward the hot end (any cell with real traffic, however
@@ -408,6 +418,26 @@ export function CesiumView() {
     const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
     return { median, min: sorted[0], max: sorted[sorted.length - 1], n: sorted.length };
   }, [onTimeEntries]);
+  // On-time gauge/histogram pop-out (2026-09-08, Ross's ask) - a separate
+  // panel, doesn't touch the existing on-time block above at all. Only a
+  // *this-session* trend, not real history - see the median-tracking
+  // notebook work still in progress for durable multi-day tracking; this
+  // rolling buffer resets whenever the on-time panel closes, deliberately,
+  // so a reopened panel never shows a stale/discontinuous graph.
+  const [showOnTimeViz, setShowOnTimeViz] = useState(false);
+  const MEDIAN_HISTORY_MAX = 60; // ~8 minutes of session history at the 8s poll cadence
+  const [medianHistory, setMedianHistory] = useState<{ t: number; median: number }[]>([]);
+  useEffect(() => {
+    if (!showOnTime) {
+      setMedianHistory([]);
+      return;
+    }
+    if (!onTimeSummary) return;
+    setMedianHistory((prev) => {
+      const next = [...prev, { t: Date.now(), median: onTimeSummary.median }];
+      return next.length > MEDIAN_HISTORY_MAX ? next.slice(next.length - MEDIAN_HISTORY_MAX) : next;
+    });
+  }, [showOnTime, onTimeSummary]);
   const allRoutes = useMemo(() => {
     const routes = new Set<string>();
     for (const bus of busDataRef.current.values()) routes.add(bus.routeId);
@@ -464,7 +494,9 @@ export function CesiumView() {
   // A location with no rectangle at all still means something too: no stop
   // and no observed activity either.
   useEffect(() => {
-    if (!showHeatmap) return;
+    // Equity also needs this same ping/stop grid to correlate against - see
+    // showEquity's own doc comment above.
+    if (!showHeatmap && !showEquity) return;
     let cancelled = false;
     setHeatmapLoading(true);
     const controller = new AbortController();
@@ -491,7 +523,91 @@ export function CesiumView() {
       cancelled = true;
       controller.abort();
     };
-  }, [showHeatmap]);
+  }, [showHeatmap, showEquity]);
+
+  // Population doesn't change between Census years - fetch once, when
+  // first needed, same lazy-preload pattern as stop arrivals/route shapes.
+  useEffect(() => {
+    if (!showEquity) return;
+    let cancelled = false;
+    setEquityLoading(true);
+    void preloadPopulation()
+      .then(() => getPopulationCells())
+      .then((cells) => {
+        if (!cancelled) setPopulationCells(cells);
+      })
+      .finally(() => {
+        if (!cancelled) setEquityLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showEquity]);
+
+  // Percentile RANK (position in sorted order, not value-relative-to-a-
+  // reference) for each entry - deliberately robust to skew, unlike a
+  // percentage-of-max approach, since population density and heat-map
+  // ping counts are both likely to have a handful of extreme outliers
+  // (a CBD block, a busy interchange) that would otherwise flatten
+  // everything else toward one end, exactly the problem the heat map
+  // itself hit before its own percentile fix.
+  function percentileRanks(values: number[]): number[] {
+    const order = values.map((v, i) => [v, i] as const).sort((a, b) => a[0] - b[0]);
+    const ranks = new Array<number>(values.length);
+    const denom = values.length > 1 ? values.length - 1 : 1;
+    order.forEach(([, originalIndex], rank) => {
+      ranks[originalIndex] = rank / denom;
+    });
+    return ranks;
+  }
+
+  // Draw each SA1 as a filled polygon, colored by how much more densely
+  // populated it is than it is well-served, *relative to every other area
+  // in the ACT* - not an absolute ratio (population and a single 100m
+  // ping-count cell are different scales entirely, so dividing one by the
+  // other would be numerically meaningless), but a genuine percentile-rank
+  // gap: red means "more densely populated than average, relative to how
+  // little service reaches it" - the literal "overpopulated but
+  // underutilised" framing Ross asked for (2026-09-08). Reuses heatColor
+  // for visual consistency with the heat map itself.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    for (const entity of equityEntitiesRef.current) viewer.entities.remove(entity);
+    equityEntitiesRef.current = [];
+    if (!showEquity || populationCells.length === 0) return;
+
+    const heatByBin = new Map<string, number>();
+    for (const cell of heatmapCells) heatByBin.set(`${cell.latBin}|${cell.lonBin}`, cell.count);
+
+    const densities = populationCells.map((c) => c.population / c.areaSqKm);
+    const heats = populationCells.map((c) => {
+      const latBin = Math.floor(c.centroidLat / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
+      const lonBin = Math.floor(c.centroidLon / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
+      return heatByBin.get(`${latBin}|${lonBin}`) ?? 0;
+    });
+    const densityRanks = percentileRanks(densities);
+    const heatRanks = percentileRanks(heats);
+
+    equityEntitiesRef.current = populationCells.map((cell, i) => {
+      const gap = densityRanks[i] - heatRanks[i]; // -1..1
+      const intensity = Math.max(0, Math.min(1, (gap + 1) / 2));
+      const color = heatColor(intensity).withAlpha(0.2 + 0.5 * intensity);
+      const positions = cell.polygon.flatMap(([lat, lon]) => [lon, lat]);
+      return viewer.entities.add({
+        polygon: {
+          hierarchy: Cartesian3.fromDegreesArray(positions),
+          material: color,
+          height: 0,
+          heightReference: HeightReference.CLAMP_TO_GROUND,
+        },
+      });
+    });
+    return () => {
+      for (const entity of equityEntitiesRef.current) viewer.entities.remove(entity);
+      equityEntitiesRef.current = [];
+    };
+  }, [showEquity, populationCells, heatmapCells]);
 
   // Draw the grid as translucent colored rectangles: blue (cold - a stop
   // exists here but little/no observed activity) through yellow to red
@@ -1275,6 +1391,41 @@ export function CesiumView() {
     };
   }, []);
 
+  // On-time gauge/histogram helpers - pure functions, no reason for these
+  // to live outside render. GAUGE_RANGE_MINUTES is the widest delay this
+  // gauge/histogram bother distinguishing - beyond it, "how late" stops
+  // being the interesting question.
+  const GAUGE_RANGE_MINUTES = 15;
+  function clampGaugeMinutes(v: number): number {
+    return Math.max(-GAUGE_RANGE_MINUTES, Math.min(GAUGE_RANGE_MINUTES, v));
+  }
+  // -15..+15 minutes maps to 180..0 degrees (math convention, 0deg = right)
+  // - sweeping left-to-right as delay goes early-to-late.
+  function gaugeAngleDeg(minutes: number): number {
+    return 180 - ((clampGaugeMinutes(minutes) + GAUGE_RANGE_MINUTES) / (2 * GAUGE_RANGE_MINUTES)) * 180;
+  }
+  function polarPoint(cx: number, cy: number, r: number, angleDeg: number): { x: number; y: number } {
+    const rad = (angleDeg * Math.PI) / 180;
+    return { x: cx + r * Math.cos(rad), y: cy - r * Math.sin(rad) };
+  }
+  function gaugeArcPath(cx: number, cy: number, r: number, fromMinutes: number, toMinutes: number): string {
+    const start = polarPoint(cx, cy, r, gaugeAngleDeg(fromMinutes));
+    const end = polarPoint(cx, cy, r, gaugeAngleDeg(toMinutes));
+    return `M ${start.x} ${start.y} A ${r} ${r} 0 0 1 ${end.x} ${end.y}`;
+  }
+  // Fixed-width bins rather than one bar per whole-minute value - readable
+  // as a small chart, and matches the same early/on-time/late color coding
+  // used everywhere else in this panel (Punctuality label, on-time rows).
+  const HISTOGRAM_BINS: { label: string; min: number; max: number; color: string }[] = [
+    { label: '<-10', min: -Infinity, max: -10, color: '#2979FF' },
+    { label: '-10..-6', min: -10, max: -6, color: '#2979FF' },
+    { label: '-6..-2', min: -6, max: -2, color: '#2979FF' },
+    { label: '-2..2', min: -2, max: 2, color: '#22c55e' },
+    { label: '2..6', min: 2, max: 6, color: '#dc2626' },
+    { label: '6..10', min: 6, max: 10, color: '#dc2626' },
+    { label: '>10', min: 10, max: Infinity, color: '#dc2626' },
+  ];
+
   return (
     <div className="relative w-full h-screen">
       <div ref={containerRef} className="w-full h-full" />
@@ -1286,6 +1437,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowEquity(false);
             setShowOnTime(false);
             setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
           }}
@@ -1306,6 +1458,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowEquity(false);
             setShowOnTime(false);
             setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
           }}
@@ -1325,6 +1478,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowEquity(false);
             setShowOnTime(false);
             toggleNearMe();
           }}
@@ -1345,6 +1499,7 @@ export function CesiumView() {
             if (nearMeActive) toggleNearMe();
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowEquity(false);
             setShowOnTime(false);
             setFilterType('all');
             setShowRoutesList(true);
@@ -1366,6 +1521,7 @@ export function CesiumView() {
             setShowRoutesList(false);
             setRouteFilter(null);
             setShowHeatmap(false);
+            setShowEquity(false);
             setShowOnTime(false);
             setFilterType('all');
             setShowBunching(true);
@@ -1409,6 +1565,7 @@ export function CesiumView() {
             setRouteFilter(null);
             setShowBunching(false);
             setShowHeatmap(false);
+            setShowEquity(false);
             setFilterType('all');
             setShowOnTime(true);
           }}
@@ -1418,6 +1575,28 @@ export function CesiumView() {
         >
           <span aria-hidden>⏱</span>
           On-time
+        </button>
+        <button
+          onClick={() => {
+            if (showEquity) {
+              setShowEquity(false);
+              return;
+            }
+            if (nearMeActive) toggleNearMe();
+            setShowRoutesList(false);
+            setRouteFilter(null);
+            setShowBunching(false);
+            setShowHeatmap(false);
+            setShowOnTime(false);
+            setFilterType('all');
+            setShowEquity(true);
+          }}
+          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
+            showEquity ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+          }`}
+        >
+          <span aria-hidden>🏘️</span>
+          {equityLoading ? 'Loading…' : 'Equity'}
         </button>
       </div>
       {showHeatmap && (
@@ -1445,6 +1624,29 @@ export function CesiumView() {
               className="flex-1"
             />
             <span className="text-gray-400 w-8 text-right">{heatmapSensitivity}</span>
+          </div>
+        </div>
+      )}
+      {showEquity && (
+        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
+          <div className="text-gray-600 font-medium">
+            2021 Census population vs. observed service (last 24h)
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-500 shrink-0">Per SA1 area, relative to the rest of the ACT:</span>
+          </div>
+          <div
+            className="inline-block h-3 rounded"
+            style={{ background: 'linear-gradient(to right, #2979FF, #FFF59D, #8B0000)' }}
+          />
+          <div className="flex justify-between text-gray-400">
+            <span>well served for its population</span>
+            <span>densely populated, underserved</span>
+          </div>
+          <div className="text-gray-400 pt-1 border-t border-gray-100">
+            {populationCells.length > 0
+              ? `${populationCells.length} SA1 areas · ${populationCells.reduce((n, c) => n + c.population, 0).toLocaleString()} people`
+              : 'Loading population data…'}
           </div>
         </div>
       )}
@@ -1740,8 +1942,19 @@ export function CesiumView() {
         <div className="absolute top-16 left-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
           {onTimeSummary && (
             <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-              <div className="text-[11px] uppercase tracking-wide text-gray-400">
-                Network median (n={onTimeSummary.n})
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] uppercase tracking-wide text-gray-400">
+                  Network median (n={onTimeSummary.n})
+                </div>
+                <button
+                  onClick={() => setShowOnTimeViz((v) => !v)}
+                  title="Gauge, trend, and distribution"
+                  className={`text-xs rounded px-1.5 py-0.5 shrink-0 ${
+                    showOnTimeViz ? 'bg-gray-900 text-white' : 'text-gray-400 hover:bg-gray-100'
+                  }`}
+                >
+                  📊
+                </button>
               </div>
               <div className="flex items-baseline justify-between">
                 <span
@@ -1797,6 +2010,95 @@ export function CesiumView() {
               </button>
             ))
           )}
+        </div>
+      )}
+      {/* On-time gauge/histogram/trend pop-out (2026-09-08, Ross's ask) -
+          a separate panel on the right, doesn't touch the on-time block on
+          the left at all. Trend is *this session only* (see
+          medianHistory's own doc comment) - durable multi-day history
+          needs the delay-at-ingestion pipeline still in progress. */}
+      {showOnTime && showOnTimeViz && onTimeSummary && (
+        <div className="absolute top-16 right-4 z-20 w-72 bg-white/95 rounded-lg shadow text-xs px-3 py-3 flex flex-col gap-4">
+          <div>
+            <div className="text-gray-500 font-medium mb-1">Network median, live</div>
+            <svg viewBox="0 0 200 115" className="w-full">
+              <path d={gaugeArcPath(100, 100, 80, -GAUGE_RANGE_MINUTES, -2)} stroke="#2979FF" strokeWidth={14} fill="none" />
+              <path d={gaugeArcPath(100, 100, 80, -2, 2)} stroke="#22c55e" strokeWidth={14} fill="none" />
+              <path d={gaugeArcPath(100, 100, 80, 2, GAUGE_RANGE_MINUTES)} stroke="#dc2626" strokeWidth={14} fill="none" />
+              {(() => {
+                const tip = polarPoint(100, 100, 68, gaugeAngleDeg(onTimeSummary.median));
+                return (
+                  <line x1={100} y1={100} x2={tip.x} y2={tip.y} stroke="#111827" strokeWidth={3} strokeLinecap="round" />
+                );
+              })()}
+              <circle cx={100} cy={100} r={5} fill="#111827" />
+              <text x={20} y={112} fontSize={9} fill="#9ca3af">
+                early
+              </text>
+              <text x={165} y={112} fontSize={9} fill="#9ca3af">
+                late
+              </text>
+            </svg>
+          </div>
+          <div>
+            <div className="text-gray-500 font-medium mb-1">
+              Median trend, this session ({medianHistory.length} polls)
+            </div>
+            {medianHistory.length < 2 ? (
+              <div className="text-gray-400">Collecting more polls…</div>
+            ) : (
+              <svg viewBox="0 0 260 60" className="w-full">
+                <line x1={0} y1={30} x2={260} y2={30} stroke="#e5e7eb" strokeWidth={1} />
+                <polyline
+                  fill="none"
+                  stroke="#111827"
+                  strokeWidth={2}
+                  points={medianHistory
+                    .map((p, i) => {
+                      const x = (i / (medianHistory.length - 1)) * 260;
+                      const y = 30 - (clampGaugeMinutes(p.median) / GAUGE_RANGE_MINUTES) * 28;
+                      return `${x},${y}`;
+                    })
+                    .join(' ')}
+                />
+              </svg>
+            )}
+          </div>
+          <div>
+            <div className="text-gray-500 font-medium mb-1">
+              Distribution right now (n={onTimeEntries.length})
+            </div>
+            <svg viewBox="0 0 260 70" className="w-full">
+              {(() => {
+                const counts = HISTOGRAM_BINS.map(
+                  (bin) =>
+                    onTimeEntries.filter(
+                      (e) => e.punctuality.delayMinutes >= bin.min && e.punctuality.delayMinutes < bin.max,
+                    ).length,
+                );
+                const maxCount = Math.max(1, ...counts);
+                const barWidth = 260 / HISTOGRAM_BINS.length;
+                return HISTOGRAM_BINS.map((bin, i) => {
+                  const h = (counts[i] / maxCount) * 50;
+                  return (
+                    <g key={bin.label}>
+                      <rect
+                        x={i * barWidth + 2}
+                        y={55 - h}
+                        width={barWidth - 4}
+                        height={h}
+                        fill={bin.color}
+                        opacity={0.85}
+                      />
+                      <text x={i * barWidth + barWidth / 2} y={67} fontSize={7} fill="#9ca3af" textAnchor="middle">
+                        {bin.label}
+                      </text>
+                    </g>
+                  );
+                });
+              })()}
+            </svg>
+          </div>
         </div>
       )}
       {selectedBus && (
