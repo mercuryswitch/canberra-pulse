@@ -197,3 +197,29 @@ export function snapToShape(
   const result = best.d2 !== Infinity ? best : bestUnrestricted;
   return { lat: result.lat, lon: result.lon, distanceAlong: result.distanceAlong };
 }
+
+/**
+ * The inverse of snapToShape's distanceAlong: given a distance along the
+ * shape, the (lat, lon) at that point. Clamped to the shape's own length.
+ * Powers continuous vehicle motion (2026-09-08): rather than Cesium
+ * extrapolating a raw Cartesian straight line (which has no idea two
+ * points are meant to follow a curve), CesiumView projects a vehicle's own
+ * recent speed forward *along this shape* every render frame and asks
+ * here for the actual on-track point at that distance - so the displayed
+ * position can never leave the route, no matter how far it's coasting
+ * past the last real fix.
+ */
+export function pointAtDistance(shape: ShapePoint[], distance: number): { lat: number; lon: number } {
+  const clamped = Math.max(0, Math.min(distance, shape[shape.length - 1].dist));
+  for (let i = 1; i < shape.length; i++) {
+    if (shape[i].dist >= clamped) {
+      const a = shape[i - 1];
+      const b = shape[i];
+      const span = b.dist - a.dist;
+      const t = span > 0 ? (clamped - a.dist) / span : 0;
+      return { lat: a.lat + t * (b.lat - a.lat), lon: a.lon + t * (b.lon - a.lon) };
+    }
+  }
+  const last = shape[shape.length - 1];
+  return { lat: last.lat, lon: last.lon };
+}
