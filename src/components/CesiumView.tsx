@@ -1,5 +1,6 @@
 import {
   CallbackPositionProperty,
+  CameraEventType,
   Cartesian2,
   Cartesian3,
   Color,
@@ -13,6 +14,7 @@ import {
   ImageryLayer,
   Ion,
   JulianDate,
+  KeyboardEventModifier,
   LabelStyle,
   Math as CesiumMath,
   OpenStreetMapImageryProvider,
@@ -207,7 +209,7 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
       <div className="px-4 py-3 flex flex-wrap gap-x-8 gap-y-2">
         {rows.map(([label, value]) => (
           <div key={label}>
-            <div className="text-[11px] uppercase tracking-wide text-white/40">{label}</div>
+            <div className="font-display text-[11px] uppercase tracking-wide text-white/40">{label}</div>
             <div className="text-sm">{value}</div>
           </div>
         ))}
@@ -306,6 +308,22 @@ export function CesiumView() {
       orientation: { pitch: CesiumMath.toRadians(-45) },
       duration: 0,
     });
+    // Explicit safeguard (2026-09-09, Ross reported Ctrl+left-drag tilt had
+    // stopped working) - nothing else in this file ever touches the camera
+    // controller, so this should already be Cesium's stock default. Setting
+    // it outright rather than leaving it implicit at least rules out any
+    // future change silently drifting away from it, and Ctrl+right-drag is
+    // added as a second binding since it costs nothing. Cesium's input
+    // system only recognises Ctrl/Shift/Alt as modifiers - Cmd/Meta was
+    // never wired to anything, which may explain why trying it felt broken.
+    // The on-screen Tilt buttons below are the real fix: they work
+    // regardless of modifier keys, OS trackpad settings, or browser quirks.
+    viewer.scene.screenSpaceCameraController.tiltEventTypes = [
+      CameraEventType.MIDDLE_DRAG,
+      CameraEventType.PINCH,
+      { eventType: CameraEventType.LEFT_DRAG, modifier: KeyboardEventModifier.CTRL },
+      { eventType: CameraEventType.RIGHT_DRAG, modifier: KeyboardEventModifier.CTRL },
+    ];
     viewerRef.current = viewer;
     // Debug aid only - lets DevTools console inspect live entity/viewer
     // state directly (e.g. window.__viewer.entities.values) without another
@@ -461,7 +479,12 @@ export function CesiumView() {
     const sorted = onTimeEntries.map((e) => e.punctuality.delayMinutes).sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-    return { median, min: sorted[0], max: sorted[sorted.length - 1], n: sorted.length };
+    // Categorical breakdown (2026-09-09) - same "within 2 minutes = on time"
+    // threshold already used for each row's own colour, rolled up network-wide.
+    const onTimeCount = sorted.filter((d) => Math.abs(d) < 2).length;
+    const lateCount = sorted.filter((d) => d >= 2).length;
+    const earlyCount = sorted.filter((d) => d <= -2).length;
+    return { median, min: sorted[0], max: sorted[sorted.length - 1], n: sorted.length, onTimeCount, lateCount, earlyCount };
   }, [onTimeEntries]);
   // On-time gauge/histogram pop-out (2026-09-08, Ross's ask - auto-shown
   // alongside the network median as of the same day, not gated behind a
@@ -547,6 +570,19 @@ export function CesiumView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- vehicleProgressRef
     // is a ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
+  // Headline figure (2026-09-09, matching every other panel's lead-with-a-
+  // number treatment). bunchingAlerts is already sorted tightest-gap-first.
+  const bunchingHeadline = useMemo(() => {
+    if (bunchingAlerts.length === 0) return null;
+    const affectedRoutes = new Set(bunchingAlerts.map((a) => a.routeId));
+    const avgGapMeters = bunchingAlerts.reduce((sum, a) => sum + a.gapMeters, 0) / bunchingAlerts.length;
+    return {
+      affectedRouteCount: affectedRoutes.size,
+      worstRouteId: bunchingAlerts[0].routeId,
+      worstGapMeters: bunchingAlerts[0].gapMeters,
+      avgGapMeters,
+    };
+  }, [bunchingAlerts]);
 
   // Fetch the heat map grid once per toggle-open (not on every poll - see
   // the state comment above for why). Unions in every known stop location,
@@ -712,9 +748,18 @@ export function CesiumView() {
   // just the worst few in the list below - a genuine network-wide count.
   const equityHeadline = useMemo(() => {
     if (equityRanking.length === 0) return null;
-    const worst = [...equityRanking].sort((a, b) => b.gap - a.gap)[0];
+    const sorted = [...equityRanking].sort((a, b) => b.gap - a.gap);
+    const worst = sorted[0];
+    const best = sorted[sorted.length - 1];
     const underservedCount = equityRanking.filter((r) => r.gap > 0).length;
-    return { worstAreaName: worst.cell.areaName, underservedCount, totalAreas: equityRanking.length };
+    const wellServedCount = equityRanking.filter((r) => r.gap < 0).length;
+    return {
+      worstAreaName: worst.cell.areaName,
+      bestAreaName: best.cell.areaName,
+      underservedCount,
+      wellServedCount,
+      totalAreas: equityRanking.length,
+    };
   }, [equityRanking]);
 
   // Draw each SA1 as a filled polygon, colored by how much more densely
@@ -837,8 +882,14 @@ export function CesiumView() {
     if (congestionRanking.length === 0) return null;
     const avgScore = congestionRanking.reduce((sum, r) => sum + r.stats.score, 0) / congestionRanking.length;
     const congestedCount = congestionRanking.filter((r) => r.stats.score >= 2 && !r.stats.closed).length;
-    return { avgScore, congestedCount, reporting: congestionRanking.length, closedCount: congestionLists.closed.length };
-  }, [congestionRanking, congestionLists.closed.length]);
+    return {
+      avgScore,
+      congestedCount,
+      reporting: congestionRanking.length,
+      closedCount: congestionLists.closed.length,
+      worstLinkName: congestionLists.mostCongested[0]?.link.name ?? null,
+    };
+  }, [congestionRanking, congestionLists.closed.length, congestionLists.mostCongested]);
 
   // "Use the congestion to measure latency of busses" (2026-09-08, Ross's
   // ask) - the actual correlation: for each currently-late/early/on-time
@@ -1014,7 +1065,9 @@ export function CesiumView() {
     if (heatmapCells.length === 0) return null;
     const active = heatmapCells.filter((c) => c.count > 0);
     const busiest = active.length > 0 ? Math.max(...active.map((c) => c.count)) : 0;
-    return { activeCells: active.length, totalCells: heatmapCells.length, busiest };
+    const totalPings = heatmapCells.reduce((sum, c) => sum + c.count, 0);
+    const coveragePct = Math.round((active.length / heatmapCells.length) * 100);
+    return { activeCells: active.length, totalCells: heatmapCells.length, busiest, totalPings, coveragePct };
   }, [heatmapCells]);
 
   // Heat cells have no name of their own - label each with its nearest bus
@@ -1828,6 +1881,25 @@ export function CesiumView() {
       })
       .catch((err: Error) => setLoaderStatus({ text: err.message, isError: true }));
   }, []);
+
+  // On-screen tilt control (2026-09-09) - a guaranteed-to-work alternative
+  // to Ctrl+drag, which Ross reported had stopped responding. Steps the
+  // camera's pitch in place (same position, same heading, just a shallower
+  // or steeper look angle) rather than re-flying anywhere.
+  function adjustTilt(deltaDeg: number) {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const camera = viewer.camera;
+    const nextPitch = CesiumMath.clamp(
+      camera.pitch + CesiumMath.toRadians(deltaDeg),
+      CesiumMath.toRadians(-85),
+      CesiumMath.toRadians(-10),
+    );
+    camera.setView({
+      destination: camera.positionWC,
+      orientation: { heading: camera.heading, pitch: nextPitch, roll: 0 },
+    });
+  }
   async function handleTriggerLoader() {
     setLoaderBusy(true);
     setLoaderStatus(null);
@@ -1849,7 +1921,7 @@ export function CesiumView() {
         <button
           onClick={() => void handleTriggerLoader()}
           disabled={loaderBusy}
-          className="bg-white/90 rounded-lg px-3 py-2 text-sm text-gray-700 shadow hover:bg-gray-100 disabled:opacity-50 flex items-center gap-1.5"
+          className="bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg px-3 py-2 text-sm text-white/80 shadow hover:bg-white/10 disabled:opacity-50 flex items-center gap-1.5"
         >
           <span aria-hidden>▶️</span>
           {loaderBusy ? 'Starting…' : 'Load live data (positions + on-time + congestion)'}
@@ -1857,14 +1929,14 @@ export function CesiumView() {
         {loaderStatus && (
           <div
             className={`text-xs px-2 py-1 rounded shadow max-w-64 text-right ${
-              loaderStatus.isError ? 'bg-red-50 text-red-700' : 'bg-white/90 text-gray-600'
+              loaderStatus.isError ? 'bg-red-50 text-red-700' : 'bg-slate-950/85 border border-white/10 backdrop-blur-xl text-white/60'
             }`}
           >
             {loaderStatus.text}
           </div>
         )}
       </div>
-      <div className="absolute top-4 left-4 bg-white/90 rounded-lg px-2 py-2 text-sm text-gray-700 shadow flex items-center gap-1">
+      <div className="absolute top-4 left-4 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg px-2 py-2 text-sm text-white/80 shadow flex items-center gap-1">
         <button
           onClick={() => {
             if (nearMeActive) toggleNearMe();
@@ -1878,7 +1950,7 @@ export function CesiumView() {
             setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            filterType === 'bus' ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            filterType === 'bus' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span
@@ -1900,7 +1972,7 @@ export function CesiumView() {
             setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            filterType === 'rail' ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            filterType === 'rail' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span
@@ -1921,7 +1993,7 @@ export function CesiumView() {
             toggleNearMe();
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            nearMeActive ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            nearMeActive ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span aria-hidden>📍</span>
@@ -1944,7 +2016,7 @@ export function CesiumView() {
             setShowRoutesList(true);
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showRoutesList ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            showRoutesList ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span aria-hidden>🛣️</span>
@@ -1967,7 +2039,7 @@ export function CesiumView() {
             setShowBunching(true);
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showBunching ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            showBunching ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           } ${bunchingAlerts.length > 0 && !showBunching ? 'text-amber-600' : ''}`}
         >
           <span aria-hidden>⚠️</span>
@@ -1988,7 +2060,7 @@ export function CesiumView() {
             setShowHeatmap(true);
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showHeatmap ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            showHeatmap ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span aria-hidden>🔥</span>
@@ -2011,7 +2083,7 @@ export function CesiumView() {
             setShowOnTime(true);
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showOnTime ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            showOnTime ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span aria-hidden>⏱</span>
@@ -2034,7 +2106,7 @@ export function CesiumView() {
             setShowEquity(true);
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showEquity ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            showEquity ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span aria-hidden>🏘️</span>
@@ -2057,7 +2129,7 @@ export function CesiumView() {
             setShowCongestion(true);
           }}
           className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showCongestion ? 'bg-gray-900 text-white' : 'hover:bg-gray-100'
+            showCongestion ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
           }`}
         >
           <span aria-hidden>🚦</span>
@@ -2065,20 +2137,20 @@ export function CesiumView() {
         </button>
       </div>
       {showHeatmap && (
-        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-64">
+        <div className="absolute top-16 left-4 z-20 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-64">
           <div className="flex items-center gap-2">
-            <span className="text-gray-500 shrink-0">Vehicle activity, last 24h:</span>
+            <span className="text-white/50 shrink-0">Vehicle activity, last 24h:</span>
             <span
               className="inline-block flex-1 h-3 rounded"
               style={{ background: 'linear-gradient(to right, #2979FF, #FFF59D, #D32F2F)' }}
             />
           </div>
-          <div className="flex justify-between text-gray-400">
+          <div className="flex justify-between text-white/40">
             <span>no stop nearby / underutilised</span>
             <span>ultra-high</span>
           </div>
-          <div className="flex items-center gap-2 pt-1 border-t border-gray-100">
-            <span className="text-gray-500 shrink-0">Sensitivity</span>
+          <div className="flex items-center gap-2 pt-1 border-t border-white/10">
+            <span className="text-white/50 shrink-0">Sensitivity</span>
             <input
               type="range"
               min={1}
@@ -2088,23 +2160,27 @@ export function CesiumView() {
               onChange={(e) => setHeatmapSensitivity(Number(e.target.value))}
               className="flex-1"
             />
-            <span className="text-gray-400 w-8 text-right">{heatmapSensitivity}</span>
+            <span className="text-white/40 w-8 text-right">{heatmapSensitivity}</span>
           </div>
         </div>
       )}
       {/* Ranked heat map list (2026-09-08, Ross's ask) - right side so it
           doesn't collide with the legend on the left. */}
       {showHeatmap && (heatRanking.top.length > 0 || heatRanking.bottom.length > 0) && (
-        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
           {heatHeadline && (
-            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-              <div className="text-[11px] uppercase tracking-wide text-gray-400">Network activity</div>
+            <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
+              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network activity</div>
               <div className="flex items-baseline justify-between">
-                <span className="text-lg font-semibold text-gray-800">
+                <span className="font-display text-lg font-semibold text-white/90">
                   {heatHeadline.activeCells}
-                  <span className="text-xs text-gray-400 font-normal"> / {heatHeadline.totalCells} cells active</span>
+                  <span className="text-xs text-white/40 font-normal"> / {heatHeadline.totalCells} cells active</span>
                 </span>
-                <span className="text-xs text-gray-400">busiest: {heatHeadline.busiest}</span>
+                <span className="text-xs text-white/40">{heatHeadline.coveragePct}% coverage</span>
+              </div>
+              <div className="flex items-baseline justify-between mt-1">
+                <span className="text-xs text-white/40">peak cell: {heatHeadline.busiest} updates</span>
+                <span className="text-xs text-white/40">{heatHeadline.totalPings.toLocaleString()} updates (24h)</span>
               </div>
             </div>
           )}
@@ -2115,7 +2191,7 @@ export function CesiumView() {
             ] as const
           ).map(([title, cells, colorClass]) => (
             <div key={title}>
-              <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+              <div className="px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85">
                 {title}
               </div>
               {cells.map((cell) => {
@@ -2137,7 +2213,7 @@ export function CesiumView() {
                         });
                       }
                     }}
-                    className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                    className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
                   >
                     <span className="truncate">{name}</span>
                     <span className={`shrink-0 font-medium ${colorClass}`}>
@@ -2151,22 +2227,22 @@ export function CesiumView() {
         </div>
       )}
       {showEquity && (
-        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
-          <div className="text-gray-600 font-medium">
+        <div className="absolute top-16 left-4 z-20 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
+          <div className="text-white/60 font-medium">
             2021 Census population vs. observed service (last 24h)
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-gray-500 shrink-0">Per SA1 area, relative to the rest of the ACT:</span>
+            <span className="text-white/50 shrink-0">Per SA1 area, relative to the rest of the ACT:</span>
           </div>
           <div
             className="inline-block h-3 rounded"
             style={{ background: 'linear-gradient(to right, #2979FF, #FFF59D, #8B0000)' }}
           />
-          <div className="flex justify-between text-gray-400">
+          <div className="flex justify-between text-white/40">
             <span>well served for its population</span>
             <span>densely populated, underserved</span>
           </div>
-          <div className="text-gray-400 pt-1 border-t border-gray-100">
+          <div className="text-white/40 pt-1 border-t border-white/10">
             {populationCells.length > 0
               ? `${populationCells.length} SA1 areas · ${populationCells.reduce((n, c) => n + c.population, 0).toLocaleString()} people`
               : 'Loading population data…'}
@@ -2177,15 +2253,20 @@ export function CesiumView() {
           densely populated, underserved, and vice versa"). Right side, same
           reasoning as the heat map list above. */}
       {showEquity && (equityLists.underserved.length > 0 || equityLists.wellServed.length > 0) && (
-        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
           {equityHeadline && (
-            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-              <div className="text-[11px] uppercase tracking-wide text-gray-400">Network equity</div>
+            <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
+              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network equity</div>
               <div className="flex items-baseline justify-between">
-                <span className="text-lg font-semibold text-red-600">{equityHeadline.underservedCount}</span>
-                <span className="text-xs text-gray-400">of {equityHeadline.totalAreas} SA1 areas underserved</span>
+                <span className="font-display text-lg font-semibold text-red-600">{equityHeadline.underservedCount}</span>
+                <span className="text-xs text-white/40">of {equityHeadline.totalAreas} SA1 areas underserved</span>
               </div>
-              <div className="text-gray-400 truncate">Worst: {equityHeadline.worstAreaName}</div>
+              <div className="flex items-baseline justify-between mt-1">
+                <span className="font-display text-sm font-semibold text-blue-600">{equityHeadline.wellServedCount}</span>
+                <span className="text-xs text-white/40">well served</span>
+              </div>
+              <div className="text-white/40 truncate mt-1">Worst: {equityHeadline.worstAreaName}</div>
+              <div className="text-white/40 truncate">Best: {equityHeadline.bestAreaName}</div>
             </div>
           )}
           {(
@@ -2195,7 +2276,7 @@ export function CesiumView() {
             ] as const
           ).map(([title, entries, colorClass]) => (
             <div key={title}>
-              <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+              <div className="px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85">
                 {title}
               </div>
               {entries.map(({ cell, densityPerSqKm }) => (
@@ -2210,14 +2291,14 @@ export function CesiumView() {
                       });
                     }
                   }}
-                  className="w-full flex flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                  className="w-full flex flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
                 >
-                  <span className="truncate font-medium text-gray-700">{cell.areaName}</span>
+                  <span className="truncate font-medium text-white/80">{cell.areaName}</span>
                   <div className="flex items-baseline justify-between gap-2 text-[11px]">
-                    <span className="text-gray-400 shrink-0">{cell.population.toLocaleString()} people live here</span>
+                    <span className="text-white/40 shrink-0">{cell.population.toLocaleString()} people live here</span>
                     <span className={`shrink-0 font-medium ${colorClass}`}>
                       {Math.round(densityPerSqKm).toLocaleString()} people/km²
-                      <span className="text-gray-400 font-normal">
+                      <span className="text-white/40 font-normal">
                         {' '}
                         ({Math.round(densityPerSqKm / 100).toLocaleString()}/ha)
                       </span>
@@ -2230,21 +2311,21 @@ export function CesiumView() {
         </div>
       )}
       {showCongestion && (
-        <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
-          <div className="text-gray-600 font-medium">Live road congestion (Bluetooth detectors)</div>
+        <div className="absolute top-16 left-4 z-20 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
+          <div className="text-white/60 font-medium">Live road congestion (Bluetooth detectors)</div>
           <div
             className="inline-block h-3 rounded"
             style={{ background: 'linear-gradient(to right, #eab308, #f97316, #dc2626)' }}
           />
-          <div className="flex justify-between text-gray-400">
+          <div className="flex justify-between text-white/40">
             <span>free-flowing</span>
             <span>severe (score 7)</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-3 h-1.5 rounded" style={{ background: '#7f1d1d' }} />
-            <span className="text-gray-500">Closed</span>
+            <span className="text-white/50">Closed</span>
           </div>
-          <div className="text-gray-400 pt-1 border-t border-gray-100">
+          <div className="text-white/40 pt-1 border-t border-white/10">
             {congestionRanking.length > 0
               ? `${congestionRanking.length} of ${trafficLinks.length} road segments reporting`
               : trafficLinks.length > 0
@@ -2257,27 +2338,30 @@ export function CesiumView() {
           Bluetooth-detector traffic API) - same right-side list pattern as
           heat map/equity. Named segments read far better than link IDs. */}
       {showCongestion && (congestionLists.mostCongested.length > 0 || congestionLists.closed.length > 0) && (
-        <div className="absolute top-16 right-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+        <div className="absolute top-16 right-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
           {congestionHeadline && (
-            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-              <div className="text-[11px] uppercase tracking-wide text-gray-400">Network congestion</div>
+            <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
+              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network congestion</div>
               <div className="flex items-baseline justify-between">
                 <span
-                  className={`text-lg font-semibold ${congestionHeadline.avgScore >= 1 ? 'text-orange-600' : 'text-gray-800'}`}
+                  className={`font-display text-lg font-semibold ${congestionHeadline.avgScore >= 1 ? 'text-orange-600' : 'text-white/90'}`}
                 >
                   {congestionHeadline.avgScore.toFixed(1)}
-                  <span className="text-xs text-gray-400 font-normal"> avg score</span>
+                  <span className="text-xs text-white/40 font-normal"> avg score</span>
                 </span>
-                <span className="text-xs text-gray-400">{congestionHeadline.reporting} segments reporting</span>
+                <span className="text-xs text-white/40">{congestionHeadline.reporting} segments reporting</span>
               </div>
-              <div className="text-gray-400">
+              <div className="text-white/40">
                 {congestionHeadline.congestedCount} congested · {congestionHeadline.closedCount} closed
               </div>
+              {congestionHeadline.worstLinkName && (
+                <div className="text-white/40 truncate mt-1">Worst: {congestionHeadline.worstLinkName}</div>
+              )}
             </div>
           )}
           {congestionLists.closed.length > 0 && (
             <div>
-              <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+              <div className="px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85">
                 Closed right now
               </div>
               {congestionLists.closed.map(({ link }) => (
@@ -2293,7 +2377,7 @@ export function CesiumView() {
                       });
                     }
                   }}
-                  className="w-full px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0 text-red-800 font-medium truncate"
+                  className="w-full px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0 text-red-800 font-medium truncate"
                 >
                   {link.name}
                 </button>
@@ -2301,7 +2385,7 @@ export function CesiumView() {
             </div>
           )}
           <div>
-            <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+            <div className="px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85">
               Most congested
             </div>
             {congestionLists.mostCongested.map(({ link, stats }) => (
@@ -2317,11 +2401,11 @@ export function CesiumView() {
                     });
                   }
                 }}
-                className="w-full flex flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                className="w-full flex flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
               >
-                <span className="truncate font-medium text-gray-700">{link.name}</span>
+                <span className="truncate font-medium text-white/80">{link.name}</span>
                 <div className="flex items-baseline justify-between gap-2 text-[11px]">
-                  <span className="text-gray-400 shrink-0">
+                  <span className="text-white/40 shrink-0">
                     {stats.speed} km/h · {stats.tt}s (free-flow {link.minTT}s)
                   </span>
                   <span className="shrink-0 font-medium" style={{ color: '#dc2626' }}>
@@ -2338,8 +2422,8 @@ export function CesiumView() {
           stops - see the vehicleUpcomingStops effect above for why. The
           vehicle info bar at the bottom is untouched either way. */}
       {nearMeActive && selectedBus && (
-        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
             <span className="font-medium truncate">
               Route {selectedBus.routeId} · Vehicle {selectedBus.id}
             </span>
@@ -2348,19 +2432,19 @@ export function CesiumView() {
                 setSelectedId(null);
                 if (viewerRef.current) viewerRef.current.selectedEntity = undefined;
               }}
-              className="text-gray-400 hover:text-gray-700 text-xs shrink-0 ml-2 underline decoration-dotted"
+              className="text-white/40 hover:text-white/80 text-xs shrink-0 ml-2 underline decoration-dotted"
             >
               Back to near me
             </button>
           </div>
           {vehicleUpcomingStops.length > 0 && (
-            <div className="px-3 py-1.5 border-b border-gray-100 text-[11px] text-gray-400">
+            <div className="px-3 py-1.5 border-b border-white/10 text-[11px] text-white/40">
               Now: {formatArrivalClock(secondsSinceMidnightNow())} — arrival times below are offsets
               from this
             </div>
           )}
           {vehicleUpcomingStops.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">
+            <div className="px-3 py-2 text-white/40">
               No upcoming stops found for this trip (may not be in today's schedule)
             </div>
           ) : (
@@ -2369,7 +2453,7 @@ export function CesiumView() {
               return (
                 <div
                   key={stop.stopId}
-                  className="px-3 py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50"
+                  className="px-3 py-2 border-b border-white/10 last:border-0 cursor-pointer hover:bg-white/10"
                   onClick={() => {
                     const viewer = viewerRef.current;
                     if (viewer) {
@@ -2382,7 +2466,7 @@ export function CesiumView() {
                 >
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="font-medium truncate">{stop.name}</span>
-                    <span className="text-gray-500 text-xs shrink-0">
+                    <span className="text-white/50 text-xs shrink-0">
                       {formatArrivalClock(stop.arrivalSeconds)} (+
                       {minutesUntil(stop.arrivalSeconds, nowSecs)}m)
                     </span>
@@ -2394,27 +2478,27 @@ export function CesiumView() {
         </div>
       )}
       {nearMeActive && !selectedBus && (
-        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
           {userLocation && nearestStops.length > 0 && (
-            <div className="px-3 py-1.5 border-b border-gray-100 text-[11px] text-gray-400 sticky top-0 bg-white/95">
+            <div className="px-3 py-1.5 border-b border-white/10 text-[11px] text-white/40 sticky top-0 bg-slate-950/85">
               Now: {formatArrivalClock(secondsSinceMidnightNow())} — arrival times below are offsets
               from this
             </div>
           )}
           {!userLocation ? (
-            <div className="px-3 py-2 text-gray-400">
+            <div className="px-3 py-2 text-white/40">
               {locationError ?? 'Finding your location…'}
             </div>
           ) : nearestStops.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">Loading nearby stops…</div>
+            <div className="px-3 py-2 text-white/40">Loading nearby stops…</div>
           ) : (
             nearestStops.map((stop) => {
               const nowSecs = secondsSinceMidnightNow();
               return (
                 <div
                   key={stop.stopId}
-                  className={`px-3 py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50 ${
-                    nextBusStopId === stop.stopId ? 'bg-blue-50' : ''
+                  className={`px-3 py-2 border-b border-white/10 last:border-0 cursor-pointer hover:bg-white/10 ${
+                    nextBusStopId === stop.stopId ? 'bg-sky-400/20' : ''
                   }`}
                   onClick={() => {
                     const viewer = viewerRef.current;
@@ -2429,12 +2513,12 @@ export function CesiumView() {
                 >
                   <div className="flex items-baseline justify-between gap-2">
                     <span className="font-medium truncate">{stop.name}</span>
-                    <span className="text-gray-400 text-xs shrink-0">
+                    <span className="text-white/40 text-xs shrink-0">
                       {formatDistance(stop.distanceMeters)}
                     </span>
                   </div>
                   {stop.routes.length === 0 ? (
-                    <div className="text-gray-400 text-xs mt-1">No scheduled services today</div>
+                    <div className="text-white/40 text-xs mt-1">No scheduled services today</div>
                   ) : (
                     <div className="mt-1 flex flex-col gap-0.5">
                       {stop.routes.map((route) => {
@@ -2444,7 +2528,7 @@ export function CesiumView() {
                             key={route.routeId}
                             className="flex items-center justify-between text-xs gap-2"
                           >
-                            <span className="font-medium text-gray-700 shrink-0">
+                            <span className="font-medium text-white/80 shrink-0">
                               Route {route.routeId}
                             </span>
                             {live !== undefined ? (
@@ -2465,7 +2549,7 @@ export function CesiumView() {
                                 🔴 Live · ~{formatDistance(live.distanceMeters)} away
                               </button>
                             ) : (
-                              <span className="text-gray-500 truncate">
+                              <span className="text-white/50 truncate">
                                 {route.nextArrivalsSeconds
                                   .map(
                                     (t) =>
@@ -2491,13 +2575,13 @@ export function CesiumView() {
           empty/placeholder panel - per Ross's "if there is none on route do
           nothing" instruction. */}
       {nearMeActive && nextBusStopId && nextBusRows.length > 0 && (
-        <div className="absolute top-16 left-[22rem] z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+        <div className="absolute top-16 left-[22rem] z-20 w-64 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
             <span className="font-medium">Next bus</span>
             <button
               onClick={() => setNextBusStopId(null)}
               aria-label="Close"
-              className="text-gray-400 hover:text-gray-700 text-lg leading-none"
+              className="text-white/40 hover:text-white/80 text-lg leading-none"
             >
               &times;
             </button>
@@ -2511,12 +2595,12 @@ export function CesiumView() {
                 const viewer = viewerRef.current;
                 if (entity && viewer) void viewer.flyTo(entity);
               }}
-              className="w-full flex flex-col items-start gap-0.5 px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+              className="w-full flex flex-col items-start gap-0.5 px-3 py-2 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
             >
-              <span className="font-medium text-gray-700">
+              <span className="font-medium text-white/80">
                 {row.directionLabel ?? `Route ${row.routeId}`}
               </span>
-              <span className="text-xs text-gray-500">
+              <span className="text-xs text-white/50">
                 {row.currentLocationName ? `Near ${row.currentLocationName}` : 'Location unknown'}
                 {' · '}
                 {row.atTerminus ? (
@@ -2530,9 +2614,9 @@ export function CesiumView() {
         </div>
       )}
       {!nearMeActive && filterType !== 'all' && (
-        <div className="absolute top-16 left-4 z-20 w-64 max-h-[60vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-64 max-h-[60vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
           {filteredList.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">No vehicles right now</div>
+            <div className="px-3 py-2 text-white/40">No vehicles right now</div>
           ) : (
             filteredList.map((b) => (
               <button
@@ -2543,10 +2627,10 @@ export function CesiumView() {
                   const viewer = viewerRef.current;
                   if (entity && viewer) void viewer.flyTo(entity);
                 }}
-                className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-100 border-b border-gray-100 last:border-0"
+                className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
               >
                 <span className="font-medium">{b.id}</span>
-                <span className="text-gray-400 text-xs">route {b.routeId}</span>
+                <span className="text-white/40 text-xs">route {b.routeId}</span>
               </button>
             ))
           )}
@@ -2558,24 +2642,24 @@ export function CesiumView() {
           Bus/Rail - there can be dozens of routes, unlike two vehicle types,
           so this needed a different visual treatment. */}
       {showRoutesList && (
-        <div className="absolute top-16 left-4 z-20 w-56 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-56 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
           {routeFilter && (
             <button
               onClick={() => setRouteFilter(null)}
-              className="w-full px-3 py-2 text-left text-gray-500 hover:bg-gray-100 border-b border-gray-100"
+              className="w-full px-3 py-2 text-left text-white/50 hover:bg-white/10 border-b border-white/10"
             >
               &larr; Show all routes
             </button>
           )}
           {allRoutes.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">No routes active right now</div>
+            <div className="px-3 py-2 text-white/40">No routes active right now</div>
           ) : (
             allRoutes.map((routeId) => (
               <button
                 key={routeId}
                 onClick={() => setRouteFilter(routeId)}
-                className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-100 border-b border-gray-100 last:border-0 ${
-                  routeFilter === routeId ? 'bg-gray-900 text-white hover:bg-gray-900' : ''
+                className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0 ${
+                  routeFilter === routeId ? 'bg-sky-500 text-white hover:bg-sky-500' : ''
                 }`}
               >
                 <span className="font-medium">Route {routeId}</span>
@@ -2589,27 +2673,35 @@ export function CesiumView() {
           untouched; this is the informational "what's busiest" view every
           other layer now has. */}
       {showRoutesList && routeCounts.length > 0 && (
-        <div className="absolute top-16 right-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
-          <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-            <div className="text-[11px] uppercase tracking-wide text-gray-400">Active routes</div>
+        <div className="absolute top-16 right-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
+          <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
+            <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Active routes</div>
             <div className="flex items-baseline justify-between">
-              <span className="text-lg font-semibold text-gray-800">{routeCounts.length}</span>
-              <span className="text-xs text-gray-400">
+              <span className="font-display text-lg font-semibold text-white/90">{routeCounts.length}</span>
+              <span className="text-xs text-white/40">
                 {routeCounts.reduce((sum, r) => sum + r.count, 0)} vehicles total
               </span>
             </div>
+            <div className="flex items-baseline justify-between mt-1">
+              <span className="text-xs text-white/40">
+                busiest: Route {routeCounts[0]?.routeId} ({routeCounts[0]?.count})
+              </span>
+              <span className="text-xs text-white/40">
+                {(routeCounts.reduce((sum, r) => sum + r.count, 0) / routeCounts.length).toFixed(1)} avg/route
+              </span>
+            </div>
           </div>
-          <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600">Busiest routes</div>
+          <div className="px-3 py-1.5 border-b border-white/10 font-medium text-white/60">Busiest routes</div>
           {routeCounts.slice(0, ROUTE_LIST_SIZE).map((r) => (
             <button
               key={r.routeId}
               onClick={() => setRouteFilter(r.routeId)}
-              className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0 ${
-                routeFilter === r.routeId ? 'bg-gray-50' : ''
+              className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0 ${
+                routeFilter === r.routeId ? 'bg-white/10' : ''
               }`}
             >
-              <span className="font-medium text-gray-700">Route {r.routeId}</span>
-              <span className="text-gray-400 shrink-0">{r.count} vehicles</span>
+              <span className="font-medium text-white/80">Route {r.routeId}</span>
+              <span className="text-white/40 shrink-0">{r.count} vehicles</span>
             </button>
           ))}
         </div>
@@ -2619,19 +2711,35 @@ export function CesiumView() {
           Real headway only for now - no comparison against scheduled
           headway yet, see the comment on bunchingAlerts above. */}
       {showBunching && (
-        <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
           {/* Headline (2026-09-08, Ross's ask - every panel leads with an
               overall figure before the granular list). */}
-          <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-            <div className="text-[11px] uppercase tracking-wide text-gray-400">Bunching alerts</div>
+          <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
+            <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Bunching alerts</div>
             <span
-              className={`text-lg font-semibold ${bunchingAlerts.length > 0 ? 'text-amber-600' : 'text-gray-800'}`}
+              className={`font-display text-lg font-semibold ${bunchingAlerts.length > 0 ? 'text-amber-600' : 'text-white/90'}`}
             >
               {bunchingAlerts.length}
             </span>
+            {bunchingHeadline && (
+              <>
+                <div className="flex items-baseline justify-between mt-1">
+                  <span className="text-xs text-white/40">{bunchingHeadline.affectedRouteCount} routes affected</span>
+                  <span className="text-xs text-white/40">worst: Route {bunchingHeadline.worstRouteId}</span>
+                </div>
+                <div className="flex items-baseline justify-between">
+                  <span className="text-xs text-white/40">
+                    tightest {formatDistance(bunchingHeadline.worstGapMeters)}
+                  </span>
+                  <span className="text-xs text-white/40">
+                    avg {formatDistance(bunchingHeadline.avgGapMeters)}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
           {bunchingAlerts.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">No bunching detected right now</div>
+            <div className="px-3 py-2 text-white/40">No bunching detected right now</div>
           ) : (
             bunchingAlerts.map((alert) => (
               <button
@@ -2644,9 +2752,9 @@ export function CesiumView() {
                     .filter((e): e is Entity => !!e);
                   if (entities.length > 0) void viewer.flyTo(entities);
                 }}
-                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
               >
-                <span className="font-medium text-gray-700">
+                <span className="font-medium text-white/80">
                   Route {alert.routeId}: {alert.vehicleA} &amp; {alert.vehicleB}
                 </span>
                 <span className="text-xs text-amber-600 font-medium shrink-0">
@@ -2662,15 +2770,15 @@ export function CesiumView() {
           starts landing on live rows - see PROJECT_STATUS.md for the
           pipeline-side status of that. */}
       {showOnTime && (
-        <div className="absolute top-16 left-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+        <div className="absolute top-16 left-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
           {onTimeSummary && (
-            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-              <div className="text-[11px] uppercase tracking-wide text-gray-400">
+            <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
+              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">
                 Network median (n={onTimeSummary.n})
               </div>
               <div className="flex items-baseline justify-between">
                 <span
-                  className={`text-lg font-semibold ${
+                  className={`font-display text-lg font-semibold ${
                     Math.abs(onTimeSummary.median) < 2
                       ? 'text-green-600'
                       : onTimeSummary.median > 0
@@ -2681,16 +2789,21 @@ export function CesiumView() {
                   {onTimeSummary.median > 0 ? '+' : ''}
                   {onTimeSummary.median}m
                 </span>
-                <span className="text-xs text-gray-400">
+                <span className="text-xs text-white/40">
                   range {onTimeSummary.min > 0 ? '+' : ''}
                   {onTimeSummary.min}m to {onTimeSummary.max > 0 ? '+' : ''}
                   {onTimeSummary.max}m
                 </span>
               </div>
+              <div className="flex items-baseline gap-2 mt-1 text-xs">
+                <span className="text-green-600 font-medium">{onTimeSummary.onTimeCount} on time</span>
+                <span className="text-red-600 font-medium">{onTimeSummary.lateCount} late</span>
+                <span className="text-blue-600 font-medium">{onTimeSummary.earlyCount} early</span>
+              </div>
             </div>
           )}
           {onTimeWithCongestion.length === 0 ? (
-            <div className="px-3 py-2 text-gray-400">
+            <div className="px-3 py-2 text-white/40">
               No stopped vehicles with a schedule match right now
             </div>
           ) : (
@@ -2703,10 +2816,10 @@ export function CesiumView() {
                   const viewer = viewerRef.current;
                   if (entity && viewer) void viewer.flyTo(entity);
                 }}
-                className="w-full flex flex-col gap-0.5 px-3 py-2 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                className="w-full flex flex-col gap-0.5 px-3 py-2 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-medium text-gray-700">
+                  <span className="font-medium text-white/80">
                     Route {entry.routeId}: {entry.vehicleId}
                   </span>
                   <span
@@ -2728,7 +2841,7 @@ export function CesiumView() {
                     vehicle with nothing nearby just shows nothing extra
                     rather than a misleading "no congestion" default. */}
                 {entry.nearby && (
-                  <div className="text-[11px] text-gray-400 truncate">
+                  <div className="text-[11px] text-white/40 truncate">
                     Nearby: {entry.nearby.link.name} · congestion score {entry.nearby.stats.score}
                   </div>
                 )}
@@ -2743,9 +2856,9 @@ export function CesiumView() {
           medianHistory's own doc comment) - durable multi-day history
           needs the delay-at-ingestion pipeline still in progress. */}
       {showOnTime && onTimeSummary && (
-        <div className="absolute top-16 right-4 z-20 w-72 bg-white/95 rounded-lg shadow text-xs px-3 py-3 flex flex-col gap-4">
+        <div className="absolute top-16 right-4 z-20 w-72 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-3 flex flex-col gap-4">
           <div>
-            <div className="text-gray-500 font-medium mb-1">Network median, live</div>
+            <div className="font-display text-white/50 font-medium mb-1">Network median, live</div>
             <svg viewBox="0 0 200 115" className="w-full">
               <path d={gaugeArcPath(100, 100, 80, -GAUGE_RANGE_MINUTES, -2)} stroke="#2979FF" strokeWidth={14} fill="none" />
               <path d={gaugeArcPath(100, 100, 80, -2, 2)} stroke="#22c55e" strokeWidth={14} fill="none" />
@@ -2753,30 +2866,30 @@ export function CesiumView() {
               {(() => {
                 const tip = polarPoint(100, 100, 68, gaugeAngleDeg(onTimeSummary.median));
                 return (
-                  <line x1={100} y1={100} x2={tip.x} y2={tip.y} stroke="#111827" strokeWidth={3} strokeLinecap="round" />
+                  <line x1={100} y1={100} x2={tip.x} y2={tip.y} stroke="#f1f5f9" strokeWidth={3} strokeLinecap="round" />
                 );
               })()}
-              <circle cx={100} cy={100} r={5} fill="#111827" />
-              <text x={20} y={112} fontSize={9} fill="#9ca3af">
+              <circle cx={100} cy={100} r={5} fill="#f1f5f9" />
+              <text x={20} y={112} fontSize={9} fill="#cbd5e1">
                 early
               </text>
-              <text x={165} y={112} fontSize={9} fill="#9ca3af">
+              <text x={165} y={112} fontSize={9} fill="#cbd5e1">
                 late
               </text>
             </svg>
           </div>
           <div>
-            <div className="text-gray-500 font-medium mb-1">
+            <div className="font-display text-white/50 font-medium mb-1">
               Median trend, this session ({medianHistory.length} polls)
             </div>
             {medianHistory.length < 2 ? (
-              <div className="text-gray-400">Collecting more polls…</div>
+              <div className="text-white/40">Collecting more polls…</div>
             ) : (
               <svg viewBox="0 0 260 60" className="w-full">
-                <line x1={0} y1={30} x2={260} y2={30} stroke="#e5e7eb" strokeWidth={1} />
+                <line x1={0} y1={30} x2={260} y2={30} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
                 <polyline
                   fill="none"
-                  stroke="#111827"
+                  stroke="#f1f5f9"
                   strokeWidth={2}
                   points={medianHistory
                     .map((p, i) => {
@@ -2790,7 +2903,7 @@ export function CesiumView() {
             )}
           </div>
           <div>
-            <div className="text-gray-500 font-medium mb-1">
+            <div className="font-display text-white/50 font-medium mb-1">
               Distribution right now (n={onTimeEntries.length})
             </div>
             <svg viewBox="0 0 260 70" className="w-full">
@@ -2815,7 +2928,7 @@ export function CesiumView() {
                         fill={bin.color}
                         opacity={0.85}
                       />
-                      <text x={i * barWidth + barWidth / 2} y={67} fontSize={7} fill="#9ca3af" textAnchor="middle">
+                      <text x={i * barWidth + barWidth / 2} y={67} fontSize={7} fill="#cbd5e1" textAnchor="middle">
                         {bin.label}
                       </text>
                     </g>
@@ -2826,6 +2939,24 @@ export function CesiumView() {
           </div>
         </div>
       )}
+      <div className="absolute bottom-4 right-4 z-30 flex flex-col items-center rounded-xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden">
+        <button
+          onClick={() => adjustTilt(-8)}
+          title="Tilt up (shallower / more flyover)"
+          aria-label="Tilt up"
+          className="w-9 h-9 flex items-center justify-center text-lg hover:bg-white/10 transition-colors border-b border-white/10"
+        >
+          ⤢
+        </button>
+        <button
+          onClick={() => adjustTilt(8)}
+          title="Tilt down (steeper / more top-down)"
+          aria-label="Tilt down"
+          className="w-9 h-9 flex items-center justify-center text-lg hover:bg-white/10 transition-colors"
+        >
+          ⤡
+        </button>
+      </div>
       {selectedBus && (
         <VehiclePanel
           bus={selectedBus}
