@@ -393,10 +393,22 @@ export function CesiumView() {
   // pale blue or dark red with barely any transition - so this needed to
   // let more of the low/mid range show up as warm, not be compressed
   // further toward cold as the original (inverse) exponent direction did.
-  // Default 25 (halfway across the 1-50 slider) per Ross's 2026-09-08 ask -
-  // was 1 (neutral/linear), which undersold the gradient before anyone
-  // touched the slider.
-  const [heatmapSensitivity, setHeatmapSensitivity] = useState(25);
+  // Default was briefly 25 ("halfway across the 1-50 slider", 2026-09-08) -
+  // reverted the same day once that actually rendered live: the curve
+  // (raw^(1/sensitivity)) is extremely front-loaded, so 25 pushes *any*
+  // cell with as little as 5% of reference traffic to ~0.89 intensity,
+  // already near-maximum red. Since only road/route cells ever have
+  // nonzero traffic at all, the whole map degenerated into "red exactly on
+  // roads, nothing off them" - no real gradient left between a lightly-
+  // used stretch and a genuinely busy one (Ross: "traces of red only
+  // around arterial roads"). "Halfway on the slider" isn't halfway in
+  // perceived effect on this curve - confirmed numerically before picking
+  // 4 instead: raw 0.1 -> 0.1 at s=1, 0.56 at s=4, 0.91 at s=25 - 4 still
+  // gives a real boost while keeping a visible spread across the range,
+  // whereas anything much above ~5-10 starts flattening toward the same
+  // "any traffic = hot" degenerate case. Slider still goes to 50 for
+  // anyone who deliberately wants that binary-looking view.
+  const [heatmapSensitivity, setHeatmapSensitivity] = useState(4);
   const heatmapEntitiesRef = useRef<Entity[]>([]);
   const routeLineEntitiesRef = useRef<Entity[]>([]);
   // #2 on-time performance (2026-09-06): every currently STOPPED_AT vehicle
@@ -1673,7 +1685,7 @@ export function CesiumView() {
       {showHeatmap && (
         <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-64">
           <div className="flex items-center gap-2">
-            <span className="text-gray-500 shrink-0">Last 24h ping density:</span>
+            <span className="text-gray-500 shrink-0">Vehicle activity, last 24h:</span>
             <span
               className="inline-block flex-1 h-3 rounded"
               style={{ background: 'linear-gradient(to right, #2979FF, #FFF59D, #D32F2F)' }}
@@ -1734,7 +1746,9 @@ export function CesiumView() {
                     className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
                   >
                     <span className="truncate">{name}</span>
-                    <span className={`shrink-0 font-medium ${colorClass}`}>{cell.count} pings</span>
+                    <span className={`shrink-0 font-medium ${colorClass}`}>
+                      {cell.count} vehicle {cell.count === 1 ? 'update' : 'updates'} (24h)
+                    </span>
                   </button>
                 );
               })}
@@ -1792,15 +1806,19 @@ export function CesiumView() {
                       });
                     }
                   }}
-                  className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0 gap-2"
+                  className="w-full flex flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
                 >
-                  <span className="truncate">
-                    {cell.areaName}
-                    <span className="text-gray-400"> · {cell.population} people</span>
-                  </span>
-                  <span className={`shrink-0 font-medium ${colorClass}`}>
-                    {Math.round(densityPerSqKm).toLocaleString()}/km²
-                  </span>
+                  <span className="truncate font-medium text-gray-700">{cell.areaName}</span>
+                  <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                    <span className="text-gray-400 shrink-0">{cell.population.toLocaleString()} people live here</span>
+                    <span className={`shrink-0 font-medium ${colorClass}`}>
+                      {Math.round(densityPerSqKm).toLocaleString()} people/km²
+                      <span className="text-gray-400 font-normal">
+                        {' '}
+                        ({Math.round(densityPerSqKm / 100).toLocaleString()}/ha)
+                      </span>
+                    </span>
+                  </div>
                 </button>
               ))}
             </div>
