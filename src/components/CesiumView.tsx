@@ -492,6 +492,24 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
 
+  // Right-side headline + ranked breakdown for Routes (2026-09-08, Ross's
+  // ask - every panel gets an overall figure plus granular details, same
+  // pattern as congestion/equity/heat map). The existing left-side picker
+  // is untouched - it's a functional control (pick one route to filter
+  // the map to), this is a separate informational "what's busiest" view.
+  const routeCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const bus of busDataRef.current.values()) {
+      counts.set(bus.routeId, (counts.get(bus.routeId) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .map(([routeId, count]) => ({ routeId, count }))
+      .sort((a, b) => b.count - a.count);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
+    // ref; pollTick is the actual trigger for recomputing this each poll.
+  }, [pollTick]);
+  const ROUTE_LIST_SIZE = 10;
+
   // #3 bus bunching (2026-09-05): two vehicles on the exact same shape (same
   // route, same direction) closer together along the route than they'd
   // realistically be if evenly spread - a classic under-resourcing/recovery-
@@ -689,6 +707,16 @@ export function CesiumView() {
     };
   }, [equityRanking]);
 
+  // Headline figure (2026-09-08, Ross's ask - every panel leads with an
+  // overall number). "Underserved" here means a positive gap at all, not
+  // just the worst few in the list below - a genuine network-wide count.
+  const equityHeadline = useMemo(() => {
+    if (equityRanking.length === 0) return null;
+    const worst = [...equityRanking].sort((a, b) => b.gap - a.gap)[0];
+    const underservedCount = equityRanking.filter((r) => r.gap > 0).length;
+    return { worstAreaName: worst.cell.areaName, underservedCount, totalAreas: equityRanking.length };
+  }, [equityRanking]);
+
   // Draw each SA1 as a filled polygon, colored by how much more densely
   // populated it is than it is well-served, *relative to every other area
   // in the ACT* - not an absolute ratio (population and a single 100m
@@ -724,23 +752,29 @@ export function CesiumView() {
     };
   }, [equityRanking]);
 
-  // Traffic-light color scale (green -> amber -> red), matching the 0-7
-  // score from link_scores.json - deliberately a different palette from
-  // heatColor's blue-yellow-red, since "green = free-flowing" is the
-  // universally understood convention for road congestion specifically,
-  // where blue would read as meaningless here.
-  function congestionColor(score: number): Color {
-    const t = Math.max(0, Math.min(1, score / 7));
+  // Yellow -> orange -> red, deliberately no green (2026-09-08, Ross:
+  // "it needs to be all yellow/orange/red scale... showing a little too
+  // much green"). Real data confirmed the reason: 719 of 725 links sit at
+  // score 0 right now (free-flowing is the overwhelmingly common case,
+  // congestion scores only kick in for genuinely bad conditions per
+  // link_scores.json's thresholds), so a green-at-zero scale meant nearly
+  // the entire network read as flat green - technically correct, but not
+  // an interesting picture. Starting at yellow instead means score 0 is
+  // still visually distinct from actual congestion (which pushes toward
+  // orange/red), without a color that all but a handful of segments will
+  // ever show.
+  function congestionColor(score: number, referenceMax: number): Color {
+    const t = Math.max(0, Math.min(1, score / referenceMax));
     if (t <= 0.5) {
       return Color.lerp(
-        Color.fromCssColorString('#22c55e'),
         Color.fromCssColorString('#eab308'),
+        Color.fromCssColorString('#f97316'),
         t * 2,
         new Color(),
       );
     }
     return Color.lerp(
-      Color.fromCssColorString('#eab308'),
+      Color.fromCssColorString('#f97316'),
       Color.fromCssColorString('#dc2626'),
       (t - 0.5) * 2,
       new Color(),
@@ -762,6 +796,29 @@ export function CesiumView() {
     return withStats;
   }, [showCongestion, showOnTime, trafficLinks, linkStats]);
 
+  // Scale color against what's actually happening right now, not the
+  // theoretical 0-7 range (2026-09-08, Ross: "the worst parts are severe,
+  // whereas free-flowing is probably... a zero or a one... adjust the
+  // threshold"). Same lesson as the heat map's own percentile fix: real
+  // traffic almost never uses the full range in either direction - free-
+  // flowing conditions rarely score above 1, and even genuinely bad
+  // congestion may not literally hit 7 very often. Scaling against a fixed
+  // 7 meant a real "this road is a mess" reading of 3-4 only reached the
+  // middle of the color range - not visually severe enough. Scaling
+  // against the 90th percentile of currently non-zero scores (same
+  // technique, not just the same idea, as the heat map's referenceMax)
+  // means whatever the worst *currently observed* congestion actually is
+  // reads as genuinely deep red, while the common near-zero majority stays
+  // correctly muted near yellow.
+  const congestionReferenceMax = useMemo(() => {
+    const nonZero = congestionRanking
+      .map((r) => r.stats.score)
+      .filter((s) => s > 0)
+      .sort((a, b) => a - b);
+    if (nonZero.length === 0) return 1;
+    return Math.max(1, nonZero[Math.floor(nonZero.length * 0.9)]);
+  }, [congestionRanking]);
+
   const CONGESTION_LIST_SIZE = 8;
   const congestionLists = useMemo(() => {
     if (congestionRanking.length === 0) return { mostCongested: [], closed: [] };
@@ -771,6 +828,17 @@ export function CesiumView() {
       closed: sorted.filter((r) => r.stats.closed),
     };
   }, [congestionRanking]);
+
+  // Headline figure (2026-09-08, Ross's ask - every panel leads with an
+  // overall number). "Congested" here means score >= 2 (link_scores.json's
+  // own lowest defined threshold), not just >0 - score 1 is still
+  // essentially normal traffic noise.
+  const congestionHeadline = useMemo(() => {
+    if (congestionRanking.length === 0) return null;
+    const avgScore = congestionRanking.reduce((sum, r) => sum + r.stats.score, 0) / congestionRanking.length;
+    const congestedCount = congestionRanking.filter((r) => r.stats.score >= 2 && !r.stats.closed).length;
+    return { avgScore, congestedCount, reporting: congestionRanking.length, closedCount: congestionLists.closed.length };
+  }, [congestionRanking, congestionLists.closed.length]);
 
   // "Use the congestion to measure latency of busses" (2026-09-08, Ross's
   // ask) - the actual correlation: for each currently-late/early/on-time
@@ -825,7 +893,9 @@ export function CesiumView() {
     if (!showCongestion || congestionRanking.length === 0) return;
 
     congestionEntitiesRef.current = congestionRanking.map(({ link, stats }) => {
-      const color = stats.closed ? Color.fromCssColorString('#7f1d1d') : congestionColor(stats.score);
+      const color = stats.closed
+        ? Color.fromCssColorString('#7f1d1d')
+        : congestionColor(stats.score, congestionReferenceMax);
       const positions = link.polyline.flatMap(([lat, lon]) => [lon, lat]);
       return viewer.entities.add({
         polyline: {
@@ -840,7 +910,7 @@ export function CesiumView() {
       for (const entity of congestionEntitiesRef.current) viewer.entities.remove(entity);
       congestionEntitiesRef.current = [];
     };
-  }, [congestionRanking, showCongestion]);
+  }, [congestionRanking, showCongestion, congestionReferenceMax]);
 
   // Draw the grid as translucent colored rectangles: blue (cold - a stop
   // exists here but little/no observed activity) through yellow to red
@@ -936,6 +1006,16 @@ export function CesiumView() {
       bottom: sorted.slice(-HEAT_LIST_SIZE).reverse(),
     };
   }, [showHeatmap, heatmapCells]);
+
+  // Headline figure for the ranked list panel (2026-09-08, Ross's ask:
+  // every panel should lead with an overall number, matching the on-time
+  // panel's own network-median header, before the granular list below).
+  const heatHeadline = useMemo(() => {
+    if (heatmapCells.length === 0) return null;
+    const active = heatmapCells.filter((c) => c.count > 0);
+    const busiest = active.length > 0 ? Math.max(...active.map((c) => c.count)) : 0;
+    return { activeCells: active.length, totalCells: heatmapCells.length, busiest };
+  }, [heatmapCells]);
 
   // Heat cells have no name of their own - label each with its nearest bus
   // stop (already-loaded stop data, cheap) so "most utilised" reads as a
@@ -1772,7 +1852,7 @@ export function CesiumView() {
           className="bg-white/90 rounded-lg px-3 py-2 text-sm text-gray-700 shadow hover:bg-gray-100 disabled:opacity-50 flex items-center gap-1.5"
         >
           <span aria-hidden>▶️</span>
-          {loaderBusy ? 'Starting…' : 'Load live data (positions + on-time)'}
+          {loaderBusy ? 'Starting…' : 'Load live data (positions + on-time + congestion)'}
         </button>
         {loaderStatus && (
           <div
@@ -2016,6 +2096,18 @@ export function CesiumView() {
           doesn't collide with the legend on the left. */}
       {showHeatmap && (heatRanking.top.length > 0 || heatRanking.bottom.length > 0) && (
         <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          {heatHeadline && (
+            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+              <div className="text-[11px] uppercase tracking-wide text-gray-400">Network activity</div>
+              <div className="flex items-baseline justify-between">
+                <span className="text-lg font-semibold text-gray-800">
+                  {heatHeadline.activeCells}
+                  <span className="text-xs text-gray-400 font-normal"> / {heatHeadline.totalCells} cells active</span>
+                </span>
+                <span className="text-xs text-gray-400">busiest: {heatHeadline.busiest}</span>
+              </div>
+            </div>
+          )}
           {(
             [
               ['Most utilised', heatRanking.top, 'text-red-600'],
@@ -2086,6 +2178,16 @@ export function CesiumView() {
           reasoning as the heat map list above. */}
       {showEquity && (equityLists.underserved.length > 0 || equityLists.wellServed.length > 0) && (
         <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          {equityHeadline && (
+            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+              <div className="text-[11px] uppercase tracking-wide text-gray-400">Network equity</div>
+              <div className="flex items-baseline justify-between">
+                <span className="text-lg font-semibold text-red-600">{equityHeadline.underservedCount}</span>
+                <span className="text-xs text-gray-400">of {equityHeadline.totalAreas} SA1 areas underserved</span>
+              </div>
+              <div className="text-gray-400 truncate">Worst: {equityHeadline.worstAreaName}</div>
+            </div>
+          )}
           {(
             [
               ['Densely populated, underserved', equityLists.underserved, 'text-red-600'],
@@ -2132,7 +2234,7 @@ export function CesiumView() {
           <div className="text-gray-600 font-medium">Live road congestion (Bluetooth detectors)</div>
           <div
             className="inline-block h-3 rounded"
-            style={{ background: 'linear-gradient(to right, #22c55e, #eab308, #dc2626)' }}
+            style={{ background: 'linear-gradient(to right, #eab308, #f97316, #dc2626)' }}
           />
           <div className="flex justify-between text-gray-400">
             <span>free-flowing</span>
@@ -2156,6 +2258,23 @@ export function CesiumView() {
           heat map/equity. Named segments read far better than link IDs. */}
       {showCongestion && (congestionLists.mostCongested.length > 0 || congestionLists.closed.length > 0) && (
         <div className="absolute top-16 right-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          {congestionHeadline && (
+            <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+              <div className="text-[11px] uppercase tracking-wide text-gray-400">Network congestion</div>
+              <div className="flex items-baseline justify-between">
+                <span
+                  className={`text-lg font-semibold ${congestionHeadline.avgScore >= 1 ? 'text-orange-600' : 'text-gray-800'}`}
+                >
+                  {congestionHeadline.avgScore.toFixed(1)}
+                  <span className="text-xs text-gray-400 font-normal"> avg score</span>
+                </span>
+                <span className="text-xs text-gray-400">{congestionHeadline.reporting} segments reporting</span>
+              </div>
+              <div className="text-gray-400">
+                {congestionHeadline.congestedCount} congested · {congestionHeadline.closedCount} closed
+              </div>
+            </div>
+          )}
           {congestionLists.closed.length > 0 && (
             <div>
               <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
@@ -2465,12 +2584,52 @@ export function CesiumView() {
           )}
         </div>
       )}
+      {/* Right-side headline + ranked breakdown for Routes (2026-09-08,
+          Ross's ask) - the left panel above is the functional route picker,
+          untouched; this is the informational "what's busiest" view every
+          other layer now has. */}
+      {showRoutesList && routeCounts.length > 0 && (
+        <div className="absolute top-16 right-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+            <div className="text-[11px] uppercase tracking-wide text-gray-400">Active routes</div>
+            <div className="flex items-baseline justify-between">
+              <span className="text-lg font-semibold text-gray-800">{routeCounts.length}</span>
+              <span className="text-xs text-gray-400">
+                {routeCounts.reduce((sum, r) => sum + r.count, 0)} vehicles total
+              </span>
+            </div>
+          </div>
+          <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600">Busiest routes</div>
+          {routeCounts.slice(0, ROUTE_LIST_SIZE).map((r) => (
+            <button
+              key={r.routeId}
+              onClick={() => setRouteFilter(r.routeId)}
+              className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0 ${
+                routeFilter === r.routeId ? 'bg-gray-50' : ''
+              }`}
+            >
+              <span className="font-medium text-gray-700">Route {r.routeId}</span>
+              <span className="text-gray-400 shrink-0">{r.count} vehicles</span>
+            </button>
+          ))}
+        </div>
+      )}
       {/* #3 bus bunching (2026-09-05): vehicles on the exact same shape
           (route + direction) closer together than BUNCHING_THRESHOLD_METERS.
           Real headway only for now - no comparison against scheduled
           headway yet, see the comment on bunchingAlerts above. */}
       {showBunching && (
         <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          {/* Headline (2026-09-08, Ross's ask - every panel leads with an
+              overall figure before the granular list). */}
+          <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+            <div className="text-[11px] uppercase tracking-wide text-gray-400">Bunching alerts</div>
+            <span
+              className={`text-lg font-semibold ${bunchingAlerts.length > 0 ? 'text-amber-600' : 'text-gray-800'}`}
+            >
+              {bunchingAlerts.length}
+            </span>
+          </div>
           {bunchingAlerts.length === 0 ? (
             <div className="px-3 py-2 text-gray-400">No bunching detected right now</div>
           ) : (

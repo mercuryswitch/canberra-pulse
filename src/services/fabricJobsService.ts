@@ -3,16 +3,20 @@
  * ask) - so restarting the live feed after an idle stretch doesn't need a
  * separate Fabric portal visit or a Claude Code session.
  *
- * One button, dual function (Ross's explicit ask, same day): starts both
- * ACTBusEventLoader (positions/routes/heat map/near-me) and ACTStopIdLoader
- * (stop_id + delay_minutes - on-time performance, the gauge/histogram
- * panel, "at stop" on the vehicle panel) together. This only became safe
- * once ACTStopIdLoader was pointed at a custom Fabric Environment with
- * azure-kusto-data pre-baked in - the real root cause of every earlier
- * job-triggered failure was a %pip-install-triggered kernel restart
- * (azure-kusto-data needs a newer PyJWT than the base runtime ships with),
- * which a job-triggered run can't survive. See PROJECT_STATUS.md for the
- * full diagnosis.
+ * One button, three functions (Ross's explicit ask for two; extended to a
+ * third the same day once it existed): starts ACTBusEventLoader
+ * (positions/routes/heat map/near-me), ACTStopIdLoader (stop_id +
+ * delay_minutes - on-time performance, the gauge/histogram panel, "at stop"
+ * on the vehicle panel), and ACTTrafficLoader (road congestion overlay +
+ * the on-time list's nearby-congestion correlation) together.
+ * ACTStopIdLoader only became safely job-triggerable once it was pointed at
+ * a custom Fabric Environment with azure-kusto-data pre-baked in - the real
+ * root cause of every earlier job-triggered failure was a %pip-install-
+ * triggered kernel restart (azure-kusto-data needs a newer PyJWT than the
+ * base runtime ships with), which a job-triggered run can't survive.
+ * ACTTrafficLoader sidesteps that class of problem entirely by never
+ * installing azure-kusto-data at all - see that notebook's own comments.
+ * See PROJECT_STATUS.md for the full diagnosis.
  *
  * Reuses the exact same signed-in MSAL session as kustoClient.ts (see that
  * file's export of ensureMsalInitialized) rather than a second sign-in -
@@ -33,12 +37,13 @@
  */
 import { ensureMsalInitialized } from './kustoClient';
 
-// This project's one Fabric workspace and the two notebooks this button
+// This project's one Fabric workspace and the notebooks this button
 // controls - not meant to be reusable/configurable, hence hardcoded rather
 // than threaded through env vars like the Kusto config is.
 const WORKSPACE_ID = '0a5fda47-d117-4567-bfc0-62f5697d4146';
 const ACT_BUS_EVENT_LOADER_ITEM_ID = '37a07431-bca6-4f2f-992a-850e3f07cfaa';
 const ACT_STOP_ID_LOADER_ITEM_ID = 'd77bdddc-0360-4cd9-9af9-4da92e1aae99';
+const ACT_TRAFFIC_LOADER_ITEM_ID = 'd96bbad1-2346-4c1d-8c76-683e71a64a7e';
 const FABRIC_API = 'https://api.fabric.microsoft.com/v1';
 // Delegated permission granted directly on the same Entra app kustoClient.ts
 // already uses (Canberra Pulse Kusto Client) - added 2026-09-08 specifically
@@ -139,9 +144,10 @@ function summarize(outcomes: SingleTriggerOutcome[]): TriggerResult {
 }
 
 /**
- * Starts both ACTBusEventLoader (positions) and ACTStopIdLoader (on-time
- * data) together - one button, dual function. A problem starting one
- * doesn't stop the other from being attempted or reported.
+ * Starts ACTBusEventLoader (positions), ACTStopIdLoader (on-time data), and
+ * ACTTrafficLoader (road congestion) together - one button, three
+ * functions. A problem starting one doesn't stop the others from being
+ * attempted or reported.
  */
 export async function triggerDataLoaders(): Promise<TriggerResult> {
   let token: string;
@@ -164,6 +170,7 @@ export async function triggerDataLoaders(): Promise<TriggerResult> {
   const outcomes = await Promise.all([
     triggerOne(token, ACT_BUS_EVENT_LOADER_ITEM_ID, 'Positions'),
     triggerOne(token, ACT_STOP_ID_LOADER_ITEM_ID, 'On-time data'),
+    triggerOne(token, ACT_TRAFFIC_LOADER_ITEM_ID, 'Congestion'),
   ]);
   return summarize(outcomes);
 }
