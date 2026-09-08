@@ -561,6 +561,45 @@ export function CesiumView() {
     return ranks;
   }
 
+  // Shared by the polygon-rendering effect below and the ranked list panel
+  // (2026-09-08, Ross's ask: "a list of the areas... densely populated,
+  // underserved, and vice versa") - computed once, not duplicated. gap is
+  // the percentile-rank difference (-1..1): positive means "more densely
+  // populated than average, relative to how little service reaches it".
+  const equityRanking = useMemo(() => {
+    if (!showEquity || populationCells.length === 0) return [];
+    const heatByBin = new Map<string, number>();
+    for (const cell of heatmapCells) heatByBin.set(`${cell.latBin}|${cell.lonBin}`, cell.count);
+
+    const densities = populationCells.map((c) => c.population / c.areaSqKm);
+    const heats = populationCells.map((c) => {
+      const latBin = Math.floor(c.centroidLat / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
+      const lonBin = Math.floor(c.centroidLon / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
+      return heatByBin.get(`${latBin}|${lonBin}`) ?? 0;
+    });
+    const densityRanks = percentileRanks(densities);
+    const heatRanks = percentileRanks(heats);
+    return populationCells.map((cell, i) => ({
+      cell,
+      densityPerSqKm: densities[i],
+      gap: densityRanks[i] - heatRanks[i],
+    }));
+  }, [showEquity, populationCells, heatmapCells]);
+
+  // Top/bottom of the same ranking, for the right-hand list panel
+  // (2026-09-08, Ross's ask). Ties (several SA1s in the same suburb with
+  // an identical gap, e.g. all-zero-service areas) aren't specially
+  // broken - stable sort keeps them in a consistent order.
+  const EQUITY_LIST_SIZE = 8;
+  const equityLists = useMemo(() => {
+    if (equityRanking.length === 0) return { underserved: [], wellServed: [] };
+    const sorted = [...equityRanking].sort((a, b) => b.gap - a.gap);
+    return {
+      underserved: sorted.slice(0, EQUITY_LIST_SIZE),
+      wellServed: sorted.slice(-EQUITY_LIST_SIZE).reverse(),
+    };
+  }, [equityRanking]);
+
   // Draw each SA1 as a filled polygon, colored by how much more densely
   // populated it is than it is well-served, *relative to every other area
   // in the ACT* - not an absolute ratio (population and a single 100m
@@ -575,22 +614,9 @@ export function CesiumView() {
     if (!viewer) return;
     for (const entity of equityEntitiesRef.current) viewer.entities.remove(entity);
     equityEntitiesRef.current = [];
-    if (!showEquity || populationCells.length === 0) return;
+    if (equityRanking.length === 0) return;
 
-    const heatByBin = new Map<string, number>();
-    for (const cell of heatmapCells) heatByBin.set(`${cell.latBin}|${cell.lonBin}`, cell.count);
-
-    const densities = populationCells.map((c) => c.population / c.areaSqKm);
-    const heats = populationCells.map((c) => {
-      const latBin = Math.floor(c.centroidLat / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
-      const lonBin = Math.floor(c.centroidLon / HEATMAP_GRID_DEGREES) * HEATMAP_GRID_DEGREES;
-      return heatByBin.get(`${latBin}|${lonBin}`) ?? 0;
-    });
-    const densityRanks = percentileRanks(densities);
-    const heatRanks = percentileRanks(heats);
-
-    equityEntitiesRef.current = populationCells.map((cell, i) => {
-      const gap = densityRanks[i] - heatRanks[i]; // -1..1
+    equityEntitiesRef.current = equityRanking.map(({ cell, gap }) => {
       const intensity = Math.max(0, Math.min(1, (gap + 1) / 2));
       const color = heatColor(intensity).withAlpha(0.2 + 0.5 * intensity);
       const positions = cell.polygon.flatMap(([lat, lon]) => [lon, lat]);
@@ -607,7 +633,7 @@ export function CesiumView() {
       for (const entity of equityEntitiesRef.current) viewer.entities.remove(entity);
       equityEntitiesRef.current = [];
     };
-  }, [showEquity, populationCells, heatmapCells]);
+  }, [equityRanking]);
 
   // Draw the grid as translucent colored rectangles: blue (cold - a stop
   // exists here but little/no observed activity) through yellow to red
@@ -686,6 +712,51 @@ export function CesiumView() {
       heatmapEntitiesRef.current = [];
     };
   }, [showHeatmap, heatmapCells, heatmapSensitivity]);
+
+  // Ranked heat map list (2026-09-08, Ross's ask: "a list of most
+  // underutilised or utilised areas") - top/bottom cells by ping count.
+  // "Underutilised" only means something for a cell that actually has a
+  // stop nearby (see the heat map's own legend: blank ≠ blue) - the union
+  // with stop coordinates upstream is exactly what puts those zero-count
+  // cells in this array in the first place, so sorting ascending naturally
+  // surfaces them, not arbitrary empty ground.
+  const HEAT_LIST_SIZE = 8;
+  const heatRanking = useMemo(() => {
+    if (!showHeatmap || heatmapCells.length === 0) return { top: [], bottom: [] };
+    const sorted = [...heatmapCells].sort((a, b) => b.count - a.count);
+    return {
+      top: sorted.slice(0, HEAT_LIST_SIZE),
+      bottom: sorted.slice(-HEAT_LIST_SIZE).reverse(),
+    };
+  }, [showHeatmap, heatmapCells]);
+
+  // Heat cells have no name of their own - label each with its nearest bus
+  // stop (already-loaded stop data, cheap) so "most utilised" reads as a
+  // real place ("near Dickson Interchange") rather than a lat/lon pair.
+  // Only resolved for the handful of cells actually shown in the list, not
+  // every cell in the grid.
+  const [heatListNames, setHeatListNames] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    const cells = [...heatRanking.top, ...heatRanking.bottom];
+    if (cells.length === 0) {
+      setHeatListNames(new Map());
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      cells.map(async (c) => {
+        const centerLat = c.latBin + HEATMAP_GRID_DEGREES / 2;
+        const centerLon = c.lonBin + HEATMAP_GRID_DEGREES / 2;
+        const name = await getNearestStopName(centerLat, centerLon);
+        return [`${c.latBin}|${c.lonBin}`, name ?? 'Unnamed area'] as const;
+      }),
+    ).then((pairs) => {
+      if (!cancelled) setHeatListNames(new Map(pairs));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [heatRanking]);
 
   // #2 on-time performance: recomputed every poll while the panel is open.
   // Deliberately scans every currently-active vehicle each time rather than
@@ -1627,6 +1698,50 @@ export function CesiumView() {
           </div>
         </div>
       )}
+      {/* Ranked heat map list (2026-09-08, Ross's ask) - right side so it
+          doesn't collide with the legend on the left. */}
+      {showHeatmap && (heatRanking.top.length > 0 || heatRanking.bottom.length > 0) && (
+        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          {(
+            [
+              ['Most utilised', heatRanking.top, 'text-red-600'],
+              ['Most underutilised (has a stop nearby)', heatRanking.bottom, 'text-blue-600'],
+            ] as const
+          ).map(([title, cells, colorClass]) => (
+            <div key={title}>
+              <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+                {title}
+              </div>
+              {cells.map((cell) => {
+                const key = `${cell.latBin}|${cell.lonBin}`;
+                const name = heatListNames.get(key) ?? '…';
+                return (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      const viewer = viewerRef.current;
+                      if (viewer) {
+                        void viewer.camera.flyTo({
+                          destination: Cartesian3.fromDegrees(
+                            cell.lonBin + HEATMAP_GRID_DEGREES / 2,
+                            cell.latBin + HEATMAP_GRID_DEGREES / 2,
+                            600,
+                          ),
+                          duration: 1.2,
+                        });
+                      }
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                  >
+                    <span className="truncate">{name}</span>
+                    <span className={`shrink-0 font-medium ${colorClass}`}>{cell.count} pings</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      )}
       {showEquity && (
         <div className="absolute top-16 left-4 z-20 bg-white/95 rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
           <div className="text-gray-600 font-medium">
@@ -1648,6 +1763,48 @@ export function CesiumView() {
               ? `${populationCells.length} SA1 areas · ${populationCells.reduce((n, c) => n + c.population, 0).toLocaleString()} people`
               : 'Loading population data…'}
           </div>
+        </div>
+      )}
+      {/* Ranked equity list (2026-09-08, Ross's ask: "a list of the areas...
+          densely populated, underserved, and vice versa"). Right side, same
+          reasoning as the heat map list above. */}
+      {showEquity && (equityLists.underserved.length > 0 || equityLists.wellServed.length > 0) && (
+        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-xs">
+          {(
+            [
+              ['Densely populated, underserved', equityLists.underserved, 'text-red-600'],
+              ['Well served for their population', equityLists.wellServed, 'text-blue-600'],
+            ] as const
+          ).map(([title, entries, colorClass]) => (
+            <div key={title}>
+              <div className="px-3 py-1.5 border-b border-gray-100 font-medium text-gray-600 sticky top-0 bg-white/95">
+                {title}
+              </div>
+              {entries.map(({ cell, densityPerSqKm }) => (
+                <button
+                  key={cell.sa1Code}
+                  onClick={() => {
+                    const viewer = viewerRef.current;
+                    if (viewer) {
+                      void viewer.camera.flyTo({
+                        destination: Cartesian3.fromDegrees(cell.centroidLon, cell.centroidLat, 800),
+                        duration: 1.2,
+                      });
+                    }
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-gray-50 border-b border-gray-100 last:border-0 gap-2"
+                >
+                  <span className="truncate">
+                    {cell.areaName}
+                    <span className="text-gray-400"> · {cell.population} people</span>
+                  </span>
+                  <span className={`shrink-0 font-medium ${colorClass}`}>
+                    {Math.round(densityPerSqKm).toLocaleString()}/km²
+                  </span>
+                </button>
+              ))}
+            </div>
+          ))}
         </div>
       )}
       {/* "Near me for this bus" (2026-09-08): selecting a vehicle while Near

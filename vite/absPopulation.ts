@@ -20,6 +20,8 @@ const ABS_SA1_POPULATION_URL =
 
 export interface PopulationCell {
   sa1Code: string;
+  /** SA2 name (e.g. "Gungahlin") - a real, recognisable locality name. SA1 itself has no name of its own in the ABS data, just a numeric code, so several SA1s legitimately share the same areaName (a suburb is usually split into several SA1s). */
+  areaName: string;
   population: number;
   /** Approximate area, via a planar shoelace estimate scaled by degree-to-metre conversion at this polygon's own latitude - fine for a density visualization, not a survey-grade measurement. */
   areaSqKm: number;
@@ -38,7 +40,7 @@ export interface PopulationSnapshot {
 type GeoJsonPolygon = { type: 'Polygon'; coordinates: number[][][] } | { type: 'MultiPolygon'; coordinates: number[][][][] };
 interface AbsFeature {
   type: 'Feature';
-  properties: { sa1_code_2021: string; tot_p_p: number | null };
+  properties: { sa1_code_2021: string; sa2_name_2021: string | null; tot_p_p: number | null };
   geometry: GeoJsonPolygon | null;
 }
 interface AbsFeatureCollection {
@@ -96,7 +98,7 @@ function outerRing(geom: GeoJsonPolygon): number[][] {
 export async function buildPopulationSnapshot(): Promise<PopulationSnapshot> {
   const url = new URL(ABS_SA1_POPULATION_URL);
   url.searchParams.set('where', "state_name_2021='Australian Capital Territory'");
-  url.searchParams.set('outFields', 'sa1_code_2021,tot_p_p');
+  url.searchParams.set('outFields', 'sa1_code_2021,sa2_name_2021,tot_p_p');
   url.searchParams.set('resultRecordCount', '2000');
   url.searchParams.set('f', 'geojson');
 
@@ -115,6 +117,7 @@ export async function buildPopulationSnapshot(): Promise<PopulationSnapshot> {
     const centroid = ringCentroid(ring);
     cells.push({
       sa1Code: feature.properties.sa1_code_2021,
+      areaName: feature.properties.sa2_name_2021 ?? 'Unknown area',
       population,
       areaSqKm: round6(areaSqKm),
       centroidLat: round6(centroid.lat),
