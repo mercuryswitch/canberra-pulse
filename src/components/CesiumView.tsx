@@ -443,13 +443,14 @@ export function CesiumView() {
     const median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
     return { median, min: sorted[0], max: sorted[sorted.length - 1], n: sorted.length };
   }, [onTimeEntries]);
-  // On-time gauge/histogram pop-out (2026-09-08, Ross's ask) - a separate
-  // panel, doesn't touch the existing on-time block above at all. Only a
-  // *this-session* trend, not real history - see the median-tracking
-  // notebook work still in progress for durable multi-day tracking; this
-  // rolling buffer resets whenever the on-time panel closes, deliberately,
-  // so a reopened panel never shows a stale/discontinuous graph.
-  const [showOnTimeViz, setShowOnTimeViz] = useState(false);
+  // On-time gauge/histogram pop-out (2026-09-08, Ross's ask - auto-shown
+  // alongside the network median as of the same day, not gated behind a
+  // separate button anymore) - a separate panel, doesn't touch the
+  // existing on-time block above at all. Only a *this-session* trend, not
+  // real history - see the median-tracking notebook work still in
+  // progress for durable multi-day tracking; this rolling buffer resets
+  // whenever the on-time panel closes, deliberately, so a reopened panel
+  // never shows a stale/discontinuous graph.
   const MEDIAN_HISTORY_MAX = 60; // ~8 minutes of session history at the 8s poll cadence
   const [medianHistory, setMedianHistory] = useState<{ t: number; median: number }[]>([]);
   useEffect(() => {
@@ -2200,19 +2201,8 @@ export function CesiumView() {
         <div className="absolute top-16 left-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
           {onTimeSummary && (
             <div className="px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] uppercase tracking-wide text-gray-400">
-                  Network median (n={onTimeSummary.n})
-                </div>
-                <button
-                  onClick={() => setShowOnTimeViz((v) => !v)}
-                  title="Gauge, trend, and distribution"
-                  className={`text-xs rounded px-1.5 py-0.5 shrink-0 ${
-                    showOnTimeViz ? 'bg-gray-900 text-white' : 'text-gray-400 hover:bg-gray-100'
-                  }`}
-                >
-                  📊
-                </button>
+              <div className="text-[11px] uppercase tracking-wide text-gray-400">
+                Network median (n={onTimeSummary.n})
               </div>
               <div className="flex items-baseline justify-between">
                 <span
@@ -2275,7 +2265,7 @@ export function CesiumView() {
           the left at all. Trend is *this session only* (see
           medianHistory's own doc comment) - durable multi-day history
           needs the delay-at-ingestion pipeline still in progress. */}
-      {showOnTime && showOnTimeViz && onTimeSummary && (
+      {showOnTime && onTimeSummary && (
         <div className="absolute top-16 right-4 z-20 w-72 bg-white/95 rounded-lg shadow text-xs px-3 py-3 flex flex-col gap-4">
           <div>
             <div className="text-gray-500 font-medium mb-1">Network median, live</div>
