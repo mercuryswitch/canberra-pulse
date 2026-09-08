@@ -218,6 +218,45 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
   );
 }
 
+/**
+ * Permanent headline counter (2026-09-09, Ross's ask: "make the headline
+ * figures permanent counters") - always visible in the top strip regardless
+ * of which tab is open, unlike the more detailed per-tab headline cards
+ * further down in the detail pane. Clicking one opens that tab, same as
+ * clicking its nav rail entry.
+ */
+function CounterCard({
+  icon,
+  label,
+  value,
+  sub,
+  active,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  value: string;
+  sub?: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex flex-col items-start gap-0.5 px-4 py-2 text-left min-w-[150px] shrink-0 transition-colors ${
+        active ? 'bg-sky-500/20' : 'hover:bg-white/5'
+      }`}
+    >
+      <div className="font-display flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-white/40">
+        <span aria-hidden>{icon}</span>
+        {label}
+      </div>
+      <div className="font-display text-xl font-semibold text-white/90">{value}</div>
+      {sub && <div className="text-[11px] text-white/40 truncate w-full">{sub}</div>}
+    </button>
+  );
+}
+
 export function CesiumView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
@@ -594,9 +633,8 @@ export function CesiumView() {
   // A location with no rectangle at all still means something too: no stop
   // and no observed activity either.
   useEffect(() => {
-    // Equity also needs this same ping/stop grid to correlate against - see
-    // showEquity's own doc comment above.
-    if (!showHeatmap && !showEquity) return;
+    // Always fetched now (2026-09-09) - the permanent headline counter strip
+    // needs this regardless of which tab is open, not just heat map/equity.
     let cancelled = false;
     setHeatmapLoading(true);
     const controller = new AbortController();
@@ -623,12 +661,13 @@ export function CesiumView() {
       cancelled = true;
       controller.abort();
     };
-  }, [showHeatmap, showEquity]);
+  }, []);
 
-  // Population doesn't change between Census years - fetch once, when
-  // first needed, same lazy-preload pattern as stop arrivals/route shapes.
+  // Population doesn't change between Census years - fetch once, at
+  // startup (2026-09-09: was lazy on showEquity, widened for the permanent
+  // headline counter strip - equity's counters need this regardless of
+  // which tab is open).
   useEffect(() => {
-    if (!showEquity) return;
     let cancelled = false;
     setEquityLoading(true);
     void preloadPopulation()
@@ -642,16 +681,12 @@ export function CesiumView() {
     return () => {
       cancelled = true;
     };
-  }, [showEquity]);
+  }, []);
 
-  // Road geometry doesn't change often - fetch once, when first needed.
-  // Also loaded for the on-time panel, not just the Congestion map layer
-  // itself (2026-09-08, Ross's ask: "use the congestion to measure latency
-  // of busses") - the two are independent, mutually-exclusive toggles, but
-  // the on-time list's nearby-congestion correlation below needs this data
-  // whether or not the congestion layer is actually being displayed.
+  // Road geometry doesn't change often - fetch once, at startup (2026-09-09:
+  // was lazy on showCongestion/showOnTime, widened for the permanent
+  // headline counter strip - same reasoning as population above).
   useEffect(() => {
-    if (!showCongestion && !showOnTime) return;
     let cancelled = false;
     void preloadTrafficLinks()
       .then(() => getTrafficLinks())
@@ -661,16 +696,14 @@ export function CesiumView() {
     return () => {
       cancelled = true;
     };
-  }, [showCongestion, showOnTime]);
+  }, []);
 
-  // Live stats refresh every poll while either panel is open, same cadence
-  // as the rest of the live app - unlike the heat map's 24h-history query,
-  // this is a genuinely live layer (stats go stale within a few minutes).
+  // Live stats refresh every poll, same cadence as the rest of the live app
+  // (2026-09-09: was gated on showCongestion/showOnTime, widened so the
+  // permanent congestion counter stays live regardless of which tab is
+  // open) - unlike the heat map's 24h-history query, this is a genuinely
+  // live layer (stats go stale within a few minutes).
   useEffect(() => {
-    if (!showCongestion && !showOnTime) {
-      setLinkStats(new Map());
-      return;
-    }
     let cancelled = false;
     setCongestionLoading(true);
     const controller = new AbortController();
@@ -685,7 +718,7 @@ export function CesiumView() {
       cancelled = true;
       controller.abort();
     };
-  }, [showCongestion, showOnTime, pollTick]);
+  }, [pollTick]);
 
   // Percentile RANK (position in sorted order, not value-relative-to-a-
   // reference) for each entry - deliberately robust to skew, unlike a
@@ -710,7 +743,7 @@ export function CesiumView() {
   // the percentile-rank difference (-1..1): positive means "more densely
   // populated than average, relative to how little service reaches it".
   const equityRanking = useMemo(() => {
-    if (!showEquity || populationCells.length === 0) return [];
+    if (populationCells.length === 0) return [];
     const heatByBin = new Map<string, number>();
     for (const cell of heatmapCells) heatByBin.set(`${cell.latBin}|${cell.lonBin}`, cell.count);
 
@@ -727,7 +760,7 @@ export function CesiumView() {
       densityPerSqKm: densities[i],
       gap: densityRanks[i] - heatRanks[i],
     }));
-  }, [showEquity, populationCells, heatmapCells]);
+  }, [populationCells, heatmapCells]);
 
   // Top/bottom of the same ranking, for the right-hand list panel
   // (2026-09-08, Ross's ask). Ties (several SA1s in the same suburb with
@@ -832,14 +865,14 @@ export function CesiumView() {
   // congestion" default, same "say nothing rather than guess" convention
   // as the heat map's blank-vs-blue distinction.
   const congestionRanking = useMemo(() => {
-    if ((!showCongestion && !showOnTime) || trafficLinks.length === 0) return [];
+    if (trafficLinks.length === 0) return [];
     const withStats: { link: TrafficLink; stats: TrafficLinkLiveStats }[] = [];
     for (const link of trafficLinks) {
       const stats = linkStats.get(link.linkId);
       if (stats) withStats.push({ link, stats });
     }
     return withStats;
-  }, [showCongestion, showOnTime, trafficLinks, linkStats]);
+  }, [trafficLinks, linkStats]);
 
   // Scale color against what's actually happening right now, not the
   // theoretical 0-7 range (2026-09-08, Ross: "the worst parts are severe,
@@ -1050,13 +1083,13 @@ export function CesiumView() {
   // surfaces them, not arbitrary empty ground.
   const HEAT_LIST_SIZE = 8;
   const heatRanking = useMemo(() => {
-    if (!showHeatmap || heatmapCells.length === 0) return { top: [], bottom: [] };
+    if (heatmapCells.length === 0) return { top: [], bottom: [] };
     const sorted = [...heatmapCells].sort((a, b) => b.count - a.count);
     return {
       top: sorted.slice(0, HEAT_LIST_SIZE),
       bottom: sorted.slice(-HEAT_LIST_SIZE).reverse(),
     };
-  }, [showHeatmap, heatmapCells]);
+  }, [heatmapCells]);
 
   // Headline figure for the ranked list panel (2026-09-08, Ross's ask:
   // every panel should lead with an overall number, matching the on-time
@@ -1098,16 +1131,14 @@ export function CesiumView() {
     };
   }, [heatRanking]);
 
-  // #2 on-time performance: recomputed every poll while the panel is open.
-  // Deliberately scans every currently-active vehicle each time rather than
-  // caching between polls - the set of STOPPED_AT vehicles changes
-  // constantly, and schedule lookups are cheap in-memory object gets once
-  // the snapshot is loaded (no network cost after the first call).
+  // #2 on-time performance: recomputed every poll (2026-09-09: was gated on
+  // showOnTime, widened so the permanent on-time headline counter stays
+  // live regardless of which tab is open). Deliberately scans every
+  // currently-active vehicle each time rather than caching between polls -
+  // the set of STOPPED_AT vehicles changes constantly, and schedule lookups
+  // are cheap in-memory object gets once the snapshot is loaded (no network
+  // cost after the first call).
   useEffect(() => {
-    if (!showOnTime) {
-      setOnTimeEntries([]);
-      return;
-    }
     let cancelled = false;
     void (async () => {
       const entries: OnTimeEntry[] = [];
@@ -1135,7 +1166,7 @@ export function CesiumView() {
     };
     // busDataRef is a ref (no lint complaint about it as a missing dep);
     // pollTick is the actual trigger for recomputing this each poll.
-  }, [showOnTime, pollTick]);
+  }, [pollTick]);
 
   // Draw the actual route line(s) as a visible overlay (2026-09-05, Ross's
   // ask) - a direct visual answer to "are vehicles actually locked to their
@@ -1914,230 +1945,335 @@ export function CesiumView() {
     }
   }
 
+  // Single source of truth for "which tab is selected" (2026-09-09) -
+  // replaces nine near-identical inline handlers (each resetting every
+  // *other* state before setting its own) with one function, consolidating
+  // logic that used to be copy-pasted per button. Deliberately reads the
+  // underlying showX/filterType/nearMeActive state rather than introducing
+  // a new parallel "activeTab" state variable - those flags already fully
+  // determine which tab is showing (that's exactly how every button already
+  // decided its own active/inactive styling), so a second source of truth
+  // would only risk drifting out of sync with them.
+  type TabId = 'bus' | 'rail' | 'nearme' | 'routes' | 'bunching' | 'heatmap' | 'ontime' | 'equity' | 'congestion';
+  function activeTab(): TabId | null {
+    if (filterType === 'bus') return 'bus';
+    if (filterType === 'rail') return 'rail';
+    if (nearMeActive) return 'nearme';
+    if (showRoutesList) return 'routes';
+    if (showBunching) return 'bunching';
+    if (showHeatmap) return 'heatmap';
+    if (showOnTime) return 'ontime';
+    if (showEquity) return 'equity';
+    if (showCongestion) return 'congestion';
+    return null;
+  }
+  // tab === null clears every filter/tab, matching the top counter's
+  // "Vehicles" card - a deliberate "show everything, nothing selected"
+  // reset rather than a tenth tab of its own.
+  function selectTab(tab: TabId | null) {
+    if (tab !== null && activeTab() === tab) {
+      // Re-clicking the active tab turns it off - same toggle-off behaviour
+      // every button already had individually.
+      switch (tab) {
+        case 'bus':
+        case 'rail':
+          setFilterType('all');
+          return;
+        case 'nearme':
+          toggleNearMe();
+          return;
+        case 'routes':
+          setShowRoutesList(false);
+          setRouteFilter(null);
+          return;
+        case 'bunching':
+          setShowBunching(false);
+          return;
+        case 'heatmap':
+          setShowHeatmap(false);
+          return;
+        case 'ontime':
+          setShowOnTime(false);
+          return;
+        case 'equity':
+          setShowEquity(false);
+          return;
+        case 'congestion':
+          setShowCongestion(false);
+          return;
+      }
+    }
+    // Reset every other tab, then activate the requested one (or nothing,
+    // for tab === null).
+    setFilterType('all');
+    if (nearMeActive && tab !== 'nearme') toggleNearMe();
+    setShowRoutesList(false);
+    setRouteFilter(null);
+    setShowBunching(false);
+    setShowHeatmap(false);
+    setShowOnTime(false);
+    setShowEquity(false);
+    setShowCongestion(false);
+    switch (tab) {
+      case 'bus':
+        setFilterType('bus');
+        break;
+      case 'rail':
+        setFilterType('rail');
+        break;
+      case 'nearme':
+        toggleNearMe();
+        break;
+      case 'routes':
+        setShowRoutesList(true);
+        break;
+      case 'bunching':
+        setShowBunching(true);
+        break;
+      case 'heatmap':
+        setShowHeatmap(true);
+        break;
+      case 'ontime':
+        setShowOnTime(true);
+        break;
+      case 'equity':
+        setShowEquity(true);
+        break;
+      case 'congestion':
+        setShowCongestion(true);
+        break;
+    }
+  }
+
   return (
-    <div className="relative w-full h-screen">
-      <div ref={containerRef} className="w-full h-full" />
-      <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1">
-        <button
-          onClick={() => void handleTriggerLoader()}
-          disabled={loaderBusy}
-          className="bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg px-3 py-2 text-sm text-white/80 shadow hover:bg-white/10 disabled:opacity-50 flex items-center gap-1.5"
-        >
-          <span aria-hidden>▶️</span>
-          {loaderBusy ? 'Starting…' : 'Load live data (positions + on-time + congestion)'}
-        </button>
-        {loaderStatus && (
-          <div
-            className={`text-xs px-2 py-1 rounded shadow max-w-64 text-right ${
-              loaderStatus.isError ? 'bg-red-50 text-red-700' : 'bg-slate-950/85 border border-white/10 backdrop-blur-xl text-white/60'
+    <div className="relative h-screen w-full flex flex-col bg-slate-950 text-white font-sans overflow-hidden">
+      {/* Header (2026-09-09, Ross's ask: "build the entire permanent panel
+          as in the Helsinki style... make the map a pane within the dash").
+          Fixed chrome, never scrolls away. */}
+      <header className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 shrink-0">
+        <div className="font-display text-base font-semibold tracking-tight">Canberra Pulse</div>
+        <div className="flex items-center gap-2">
+          {loaderStatus && (
+            <span
+              className={`text-xs px-2 py-1 rounded max-w-64 truncate ${
+                loaderStatus.isError ? 'bg-red-50 text-red-700' : 'text-white/50'
+              }`}
+            >
+              {loaderStatus.text}
+            </span>
+          )}
+          <button
+            onClick={() => void handleTriggerLoader()}
+            disabled={loaderBusy}
+            className="bg-white/10 hover:bg-white/20 rounded-lg px-3 py-1.5 text-sm text-white/80 disabled:opacity-50 flex items-center gap-1.5 transition-colors shrink-0"
+          >
+            <span aria-hidden>▶️</span>
+            {loaderBusy ? 'Starting…' : 'Load live data'}
+          </button>
+        </div>
+      </header>
+
+      {/* Permanent headline counter strip (2026-09-09, Ross's ask: "make the
+          headline figures permanent counters") - always visible regardless
+          of which tab is open, unlike the old per-tab-only headline cards
+          still further down. Backing data (population/traffic/on-time) now
+          fetches unconditionally at startup instead of lazily on tab-open -
+          see the widened useEffects above - so these numbers are live from
+          the first poll, not just placeholders until a tab is opened once. */}
+      <div className="flex items-stretch divide-x divide-white/10 border-b border-white/10 shrink-0 overflow-x-auto">
+        <CounterCard
+          icon="🚌"
+          label="Vehicles"
+          value={String(busCount + railCount)}
+          sub={`${busCount} bus · ${railCount} rail`}
+          active={activeTab() === null}
+          onClick={() => selectTab(null)}
+        />
+        <CounterCard
+          icon="⏱"
+          label="On-time median"
+          value={onTimeSummary ? `${onTimeSummary.median > 0 ? '+' : ''}${onTimeSummary.median}m` : '—'}
+          sub={onTimeSummary ? `n=${onTimeSummary.n}` : 'no data yet'}
+          active={activeTab() === 'ontime'}
+          onClick={() => selectTab('ontime')}
+        />
+        <CounterCard
+          icon="🚦"
+          label="Congestion"
+          value={congestionHeadline ? congestionHeadline.avgScore.toFixed(1) : '—'}
+          sub={congestionHeadline ? `${congestionHeadline.congestedCount} congested` : 'no data yet'}
+          active={activeTab() === 'congestion'}
+          onClick={() => selectTab('congestion')}
+        />
+        <CounterCard
+          icon="🏘️"
+          label="Underserved areas"
+          value={equityHeadline ? String(equityHeadline.underservedCount) : '—'}
+          sub={equityHeadline ? `of ${equityHeadline.totalAreas} SA1 areas` : 'no data yet'}
+          active={activeTab() === 'equity'}
+          onClick={() => selectTab('equity')}
+        />
+        <CounterCard
+          icon="⚠️"
+          label="Bunching"
+          value={String(bunchingAlerts.length)}
+          sub={bunchingHeadline ? `${bunchingHeadline.affectedRouteCount} routes` : 'none right now'}
+          active={activeTab() === 'bunching'}
+          onClick={() => selectTab('bunching')}
+        />
+        <CounterCard
+          icon="🔥"
+          label="Heat coverage"
+          value={heatHeadline ? `${heatHeadline.coveragePct}%` : '—'}
+          sub={heatHeadline ? `${heatHeadline.activeCells}/${heatHeadline.totalCells} cells` : 'no data yet'}
+          active={activeTab() === 'heatmap'}
+          onClick={() => selectTab('heatmap')}
+        />
+        <CounterCard
+          icon="🛣️"
+          label="Active routes"
+          value={String(routeCounts.length)}
+          sub={`${routeCounts.reduce((sum, r) => sum + r.count, 0)} vehicles`}
+          active={activeTab() === 'routes'}
+          onClick={() => selectTab('routes')}
+        />
+      </div>
+
+      {/* Body: nav rail + map pane + detail pane. */}
+      <div className="flex-1 flex min-h-0">
+        <nav className="w-44 shrink-0 border-r border-white/10 flex flex-col overflow-y-auto py-2 gap-0.5">
+          <button
+            onClick={() => selectTab('bus')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'bus' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
             }`}
           >
-            {loaderStatus.text}
-          </div>
-        )}
-      </div>
-      <div className="absolute top-4 left-4 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg px-2 py-2 text-sm text-white/80 shadow flex items-center gap-1">
+            <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: TYPE_COLOR.bus }} />
+            {busCount} Bus
+          </button>
+          <button
+            onClick={() => selectTab('rail')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'rail' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: TYPE_COLOR.rail }} />
+            {railCount} Light rail
+          </button>
+          <button
+            onClick={() => selectTab('nearme')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'nearme' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>📍</span>
+            Near me
+          </button>
+          <button
+            onClick={() => selectTab('routes')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'routes' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>🛣️</span>
+            Routes
+          </button>
+          <button
+            onClick={() => selectTab('bunching')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'bunching' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            } ${bunchingAlerts.length > 0 && activeTab() !== 'bunching' ? 'text-amber-500' : ''}`}
+          >
+            <span aria-hidden>⚠️</span>
+            {bunchingAlerts.length > 0 ? `${bunchingAlerts.length} Bunched` : 'Bunching'}
+          </button>
+          <button
+            onClick={() => selectTab('heatmap')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'heatmap' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>🔥</span>
+            {heatmapLoading ? 'Loading…' : 'Heat map'}
+          </button>
+          <button
+            onClick={() => selectTab('ontime')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'ontime' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>⏱</span>
+            On-time
+          </button>
+          <button
+            onClick={() => selectTab('equity')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'equity' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>🏘️</span>
+            {equityLoading ? 'Loading…' : 'Equity'}
+          </button>
+          <button
+            onClick={() => selectTab('congestion')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'congestion' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>🚦</span>
+            {congestionLoading ? 'Loading…' : 'Congestion'}
+          </button>
+        </nav>
+
+        {/* Map pane (2026-09-09, Ross's ask: "make the map a pane within the
+            dash") - bounded card, not full-bleed. Cesium's Viewer resizes to
+            fill whatever container it's given, so this needed no change to
+            the Cesium setup itself, only to the CSS around it. */}
+        <div className="flex-1 relative min-w-0 m-3 rounded-2xl overflow-hidden border border-white/10 bg-black">
+          <div ref={containerRef} className="absolute inset-0" />
+      <div className="absolute bottom-4 right-4 z-30 flex flex-col items-center rounded-xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden">
         <button
-          onClick={() => {
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowEquity(false);
-            setShowCongestion(false);
-            setShowOnTime(false);
-            setFilterType((t) => (t === 'bus' ? 'all' : 'bus'));
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            filterType === 'bus' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
+          onClick={() => adjustTilt(-8)}
+          title="Tilt up (shallower / more flyover)"
+          aria-label="Tilt up"
+          className="w-9 h-9 flex items-center justify-center text-lg hover:bg-white/10 transition-colors border-b border-white/10"
         >
-          <span
-            className="inline-block w-2.5 h-2.5 rounded-full"
-            style={{ backgroundColor: TYPE_COLOR.bus }}
-          />
-          {busCount} Bus
+          ⤢
         </button>
         <button
-          onClick={() => {
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowEquity(false);
-            setShowCongestion(false);
-            setShowOnTime(false);
-            setFilterType((t) => (t === 'rail' ? 'all' : 'rail'));
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            filterType === 'rail' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
+          onClick={() => adjustTilt(8)}
+          title="Tilt down (steeper / more top-down)"
+          aria-label="Tilt down"
+          className="w-9 h-9 flex items-center justify-center text-lg hover:bg-white/10 transition-colors"
         >
-          <span
-            className="inline-block w-2.5 h-2.5 rounded-full"
-            style={{ backgroundColor: TYPE_COLOR.rail }}
-          />
-          {railCount} Light rail
-        </button>
-        <button
-          onClick={() => {
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowEquity(false);
-            setShowCongestion(false);
-            setShowOnTime(false);
-            toggleNearMe();
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            nearMeActive ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
-        >
-          <span aria-hidden>📍</span>
-          Near me
-        </button>
-        <button
-          onClick={() => {
-            if (showRoutesList) {
-              setShowRoutesList(false);
-              setRouteFilter(null);
-              return;
-            }
-            if (nearMeActive) toggleNearMe();
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowEquity(false);
-            setShowCongestion(false);
-            setShowOnTime(false);
-            setFilterType('all');
-            setShowRoutesList(true);
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showRoutesList ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
-        >
-          <span aria-hidden>🛣️</span>
-          Routes
-        </button>
-        <button
-          onClick={() => {
-            if (showBunching) {
-              setShowBunching(false);
-              return;
-            }
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowHeatmap(false);
-            setShowEquity(false);
-            setShowCongestion(false);
-            setShowOnTime(false);
-            setFilterType('all');
-            setShowBunching(true);
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showBunching ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          } ${bunchingAlerts.length > 0 && !showBunching ? 'text-amber-600' : ''}`}
-        >
-          <span aria-hidden>⚠️</span>
-          {bunchingAlerts.length > 0 ? `${bunchingAlerts.length} Bunched` : 'Bunching'}
-        </button>
-        <button
-          onClick={() => {
-            if (showHeatmap) {
-              setShowHeatmap(false);
-              return;
-            }
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowOnTime(false);
-            setFilterType('all');
-            setShowHeatmap(true);
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showHeatmap ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
-        >
-          <span aria-hidden>🔥</span>
-          {heatmapLoading ? 'Loading…' : 'Heat map'}
-        </button>
-        <button
-          onClick={() => {
-            if (showOnTime) {
-              setShowOnTime(false);
-              return;
-            }
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowEquity(false);
-            setShowCongestion(false);
-            setFilterType('all');
-            setShowOnTime(true);
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showOnTime ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
-        >
-          <span aria-hidden>⏱</span>
-          On-time
-        </button>
-        <button
-          onClick={() => {
-            if (showEquity) {
-              setShowEquity(false);
-              return;
-            }
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowOnTime(false);
-            setShowCongestion(false);
-            setFilterType('all');
-            setShowEquity(true);
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showEquity ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
-        >
-          <span aria-hidden>🏘️</span>
-          {equityLoading ? 'Loading…' : 'Equity'}
-        </button>
-        <button
-          onClick={() => {
-            if (showCongestion) {
-              setShowCongestion(false);
-              return;
-            }
-            if (nearMeActive) toggleNearMe();
-            setShowRoutesList(false);
-            setRouteFilter(null);
-            setShowBunching(false);
-            setShowHeatmap(false);
-            setShowOnTime(false);
-            setShowEquity(false);
-            setFilterType('all');
-            setShowCongestion(true);
-          }}
-          className={`flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors ${
-            showCongestion ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-          }`}
-        >
-          <span aria-hidden>🚦</span>
-          {congestionLoading ? 'Loading…' : 'Congestion'}
+          ⤡
         </button>
       </div>
+      {selectedBus && (
+        <VehiclePanel
+          bus={selectedBus}
+          onClose={() => {
+            setSelectedId(null);
+            if (viewerRef.current) viewerRef.current.selectedEntity = undefined;
+          }}
+        />
+      )}
+      <div className="absolute bottom-2 right-3 text-[11px] text-white/50">
+        3D model: "Bus low poly simple GLB" by Chelebonchik Games (CC-BY 4.0)
+      </div>
+        </div>
+
+        {/* Detail pane - docked, not floating over the map (2026-09-09).
+            Every section below keeps its own original show/active condition
+            unchanged; only the outer floating-panel chrome (position,
+            background, border, its own scroll container) was stripped,
+            since this shared aside now provides all of that once for
+            whichever tab is actually active. Only one tab's condition is
+            ever true at a time (near me's own sub-states aside). */}
+        {activeTab() !== null && (
+          <aside className="w-80 shrink-0 border-l border-white/10 bg-slate-950/85 backdrop-blur-xl overflow-y-auto">
       {showHeatmap && (
-        <div className="absolute top-16 left-4 z-20 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-64">
+        <div className="text-xs px-3 py-2 flex flex-col gap-2 border-b border-white/10">
           <div className="flex items-center gap-2">
             <span className="text-white/50 shrink-0">Vehicle activity, last 24h:</span>
             <span
@@ -2167,7 +2303,7 @@ export function CesiumView() {
       {/* Ranked heat map list (2026-09-08, Ross's ask) - right side so it
           doesn't collide with the legend on the left. */}
       {showHeatmap && (heatRanking.top.length > 0 || heatRanking.bottom.length > 0) && (
-        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
+        <div className="text-xs">
           {heatHeadline && (
             <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
               <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network activity</div>
@@ -2227,7 +2363,7 @@ export function CesiumView() {
         </div>
       )}
       {showEquity && (
-        <div className="absolute top-16 left-4 z-20 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
+        <div className="text-xs px-3 py-2 flex flex-col gap-2 border-b border-white/10">
           <div className="text-white/60 font-medium">
             2021 Census population vs. observed service (last 24h)
           </div>
@@ -2253,7 +2389,7 @@ export function CesiumView() {
           densely populated, underserved, and vice versa"). Right side, same
           reasoning as the heat map list above. */}
       {showEquity && (equityLists.underserved.length > 0 || equityLists.wellServed.length > 0) && (
-        <div className="absolute top-16 right-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
+        <div className="text-xs">
           {equityHeadline && (
             <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
               <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network equity</div>
@@ -2311,7 +2447,7 @@ export function CesiumView() {
         </div>
       )}
       {showCongestion && (
-        <div className="absolute top-16 left-4 z-20 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-2 flex flex-col gap-2 w-72">
+        <div className="text-xs px-3 py-2 flex flex-col gap-2 border-b border-white/10">
           <div className="text-white/60 font-medium">Live road congestion (Bluetooth detectors)</div>
           <div
             className="inline-block h-3 rounded"
@@ -2338,7 +2474,7 @@ export function CesiumView() {
           Bluetooth-detector traffic API) - same right-side list pattern as
           heat map/equity. Named segments read far better than link IDs. */}
       {showCongestion && (congestionLists.mostCongested.length > 0 || congestionLists.closed.length > 0) && (
-        <div className="absolute top-16 right-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
+        <div className="text-xs">
           {congestionHeadline && (
             <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
               <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network congestion</div>
@@ -2422,7 +2558,7 @@ export function CesiumView() {
           stops - see the vehicleUpcomingStops effect above for why. The
           vehicle info bar at the bottom is untouched either way. */}
       {nearMeActive && selectedBus && (
-        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm">
           <div className="flex items-center justify-between px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
             <span className="font-medium truncate">
               Route {selectedBus.routeId} · Vehicle {selectedBus.id}
@@ -2478,7 +2614,7 @@ export function CesiumView() {
         </div>
       )}
       {nearMeActive && !selectedBus && (
-        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm">
           {userLocation && nearestStops.length > 0 && (
             <div className="px-3 py-1.5 border-b border-white/10 text-[11px] text-white/40 sticky top-0 bg-slate-950/85">
               Now: {formatArrivalClock(secondsSinceMidnightNow())} — arrival times below are offsets
@@ -2575,7 +2711,7 @@ export function CesiumView() {
           empty/placeholder panel - per Ross's "if there is none on route do
           nothing" instruction. */}
       {nearMeActive && nextBusStopId && nextBusRows.length > 0 && (
-        <div className="absolute top-16 left-[22rem] z-20 w-64 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm border-t border-white/10">
           <div className="flex items-center justify-between px-3 py-2 border-b border-white/10">
             <span className="font-medium">Next bus</span>
             <button
@@ -2614,7 +2750,7 @@ export function CesiumView() {
         </div>
       )}
       {!nearMeActive && filterType !== 'all' && (
-        <div className="absolute top-16 left-4 z-20 w-64 max-h-[60vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm">
           {filteredList.length === 0 ? (
             <div className="px-3 py-2 text-white/40">No vehicles right now</div>
           ) : (
@@ -2642,7 +2778,7 @@ export function CesiumView() {
           Bus/Rail - there can be dozens of routes, unlike two vehicle types,
           so this needed a different visual treatment. */}
       {showRoutesList && (
-        <div className="absolute top-16 left-4 z-20 w-56 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm border-b border-white/10">
           {routeFilter && (
             <button
               onClick={() => setRouteFilter(null)}
@@ -2673,7 +2809,7 @@ export function CesiumView() {
           untouched; this is the informational "what's busiest" view every
           other layer now has. */}
       {showRoutesList && routeCounts.length > 0 && (
-        <div className="absolute top-16 right-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs">
+        <div className="text-xs">
           <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
             <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Active routes</div>
             <div className="flex items-baseline justify-between">
@@ -2711,7 +2847,7 @@ export function CesiumView() {
           Real headway only for now - no comparison against scheduled
           headway yet, see the comment on bunchingAlerts above. */}
       {showBunching && (
-        <div className="absolute top-16 left-4 z-20 w-64 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm">
           {/* Headline (2026-09-08, Ross's ask - every panel leads with an
               overall figure before the granular list). */}
           <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
@@ -2770,7 +2906,7 @@ export function CesiumView() {
           starts landing on live rows - see PROJECT_STATUS.md for the
           pipeline-side status of that. */}
       {showOnTime && (
-        <div className="absolute top-16 left-4 z-20 w-72 max-h-[70vh] overflow-y-auto bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-sm">
+        <div className="text-sm border-b border-white/10">
           {onTimeSummary && (
             <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
               <div className="font-display text-[11px] uppercase tracking-wide text-white/40">
@@ -2856,7 +2992,7 @@ export function CesiumView() {
           medianHistory's own doc comment) - durable multi-day history
           needs the delay-at-ingestion pipeline still in progress. */}
       {showOnTime && onTimeSummary && (
-        <div className="absolute top-16 right-4 z-20 w-72 bg-slate-950/85 border border-white/10 backdrop-blur-xl rounded-lg shadow text-xs px-3 py-3 flex flex-col gap-4">
+        <div className="text-xs px-3 py-3 flex flex-col gap-4">
           <div>
             <div className="font-display text-white/50 font-medium mb-1">Network median, live</div>
             <svg viewBox="0 0 200 115" className="w-full">
@@ -2939,33 +3075,9 @@ export function CesiumView() {
           </div>
         </div>
       )}
-      <div className="absolute bottom-4 right-4 z-30 flex flex-col items-center rounded-xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden">
-        <button
-          onClick={() => adjustTilt(-8)}
-          title="Tilt up (shallower / more flyover)"
-          aria-label="Tilt up"
-          className="w-9 h-9 flex items-center justify-center text-lg hover:bg-white/10 transition-colors border-b border-white/10"
-        >
-          ⤢
-        </button>
-        <button
-          onClick={() => adjustTilt(8)}
-          title="Tilt down (steeper / more top-down)"
-          aria-label="Tilt down"
-          className="w-9 h-9 flex items-center justify-center text-lg hover:bg-white/10 transition-colors"
-        >
-          ⤡
-        </button>
+          </aside>
+        )}
       </div>
-      {selectedBus && (
-        <VehiclePanel
-          bus={selectedBus}
-          onClose={() => {
-            setSelectedId(null);
-            if (viewerRef.current) viewerRef.current.selectedEntity = undefined;
-          }}
-        />
-      )}
       {/* Deliberately a hard-to-miss modal, not a small corner button - a small
           button here is how the 2026-09 "0 vehicles, no error" saga happened:
           signing into the app itself (Rayfin auth) is a separate step from
@@ -2995,9 +3107,6 @@ export function CesiumView() {
           {error}
         </div>
       )}
-      <div className="absolute bottom-2 right-3 text-[11px] text-white/50">
-        3D model: "Bus low poly simple GLB" by Chelebonchik Games (CC-BY 4.0)
-      </div>
     </div>
   );
 }
