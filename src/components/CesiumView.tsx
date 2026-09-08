@@ -34,7 +34,7 @@ import {
   HEATMAP_GRID_DEGREES,
   type HeatmapCell,
 } from '@/services/busService';
-import { triggerBusEventLoader } from '@/services/fabricJobsService';
+import { resumePendingTriggerIfAny, triggerBusEventLoader } from '@/services/fabricJobsService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
 import { getPopulationCells, preloadPopulation, type PopulationCell } from '@/services/populationService';
 import {
@@ -1546,6 +1546,16 @@ export function CesiumView() {
   // ACTStopIdLoader isn't wired up here yet.
   const [loaderStatus, setLoaderStatus] = useState<{ text: string; isError: boolean } | null>(null);
   const [loaderBusy, setLoaderBusy] = useState(false);
+  // Resumes a trigger interrupted by the one-time consent redirect (see
+  // fabricJobsService.ts) - a no-op on every normal page load, since
+  // there's nothing pending unless the button's own redirect just returned.
+  useEffect(() => {
+    void resumePendingTriggerIfAny()
+      .then((result) => {
+        if (result) setLoaderStatus({ text: result.message, isError: false });
+      })
+      .catch((err: Error) => setLoaderStatus({ text: err.message, isError: true }));
+  }, []);
   async function handleTriggerLoader() {
     setLoaderBusy(true);
     setLoaderStatus(null);
