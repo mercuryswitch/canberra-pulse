@@ -18,12 +18,16 @@ export const POPULATION_FILE = 'population.json';
  * populationService.ts's fallback).
  */
 export function populationSnapshotPlugin(): Plugin {
+  let root = process.cwd();
   return {
     name: 'act-population-snapshot',
     apply: 'build',
+    configResolved(config) {
+      root = config.root;
+    },
     async generateBundle() {
       try {
-        const snapshot = await buildPopulationSnapshot();
+        const snapshot = await buildPopulationSnapshot(root);
         this.emitFile({
           type: 'asset',
           fileName: POPULATION_FILE,

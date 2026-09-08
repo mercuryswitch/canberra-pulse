@@ -3,20 +3,34 @@
  * (2026-09-08): "how is population spread across the city, and where does
  * that not match actual bus service."
  *
- * Unlike the GTFS static data, this needs no credentials and no shapefile
- * wrangling - ABS hosts the 2021 Census G01 (population) table already
- * joined to SA1 (Statistical Area 1, ~200-800 people each - the finest
- * standard Census geography, a reasonable match for the heat map's own
- * ~100m grid) boundaries in a live, public ArcGIS FeatureServer, filterable
- * server-side to just the ACT and exportable directly as GeoJSON. Confirmed
- * directly before writing this: 1227 real ACT SA1 polygons, population sum
- * 453,741 - matches Canberra's published 2021 Census population (452,670)
- * closely enough to trust the data. maxRecordCount on this service is 2000,
+ * Unlike the GTFS static data (which genuinely can change - timetables,
+ * routes, stops), Census population is a 2021 figure that won't be
+ * superseded until the 2026 Census results are released - years, not
+ * days. Ross's ask (2026-09-08): don't re-hit ABS's live service on every
+ * single build for a number that moves this slowly. Cached to
+ * vite/cache/abs-sa1-population-act-2021.geojson, committed to the repo -
+ * a build only ever fetches from ABS once, the first time this cache
+ * doesn't exist yet. Delete that file (e.g. once the 2026 Census data is
+ * out) to force a genuine refresh.
+ *
+ * The service itself: ABS hosts the 2021 Census G01 (population) table
+ * already joined to SA1 (Statistical Area 1, ~200-800 people each - the
+ * finest standard Census geography, a reasonable match for the heat map's
+ * own ~100m grid) boundaries in a live, public ArcGIS FeatureServer,
+ * filterable server-side to just the ACT and exportable directly as
+ * GeoJSON - no shapefile download/wrangling needed. Confirmed directly
+ * before writing this: 1227 real ACT SA1 polygons, population sum 453,741
+ * - matches Canberra's published 2021 Census population (452,670) closely
+ * enough to trust the data. maxRecordCount on this service is 2000,
  * comfortably above the ACT's 1227 records, so this is a single request,
  * no pagination needed.
  */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+
 const ABS_SA1_POPULATION_URL =
   'https://geo.abs.gov.au/arcgis/rest/services/Hosted/ABS_2021_Census_G01_SA1/FeatureServer/0/query';
+const CACHE_RELATIVE_PATH = 'vite/cache/abs-sa1-population-act-2021.geojson';
 
 export interface PopulationCell {
   sa1Code: string;
@@ -95,7 +109,11 @@ function outerRing(geom: GeoJsonPolygon): number[][] {
   return best;
 }
 
-export async function buildPopulationSnapshot(): Promise<PopulationSnapshot> {
+async function fetchAbsFeatures(cachePath: string): Promise<AbsFeatureCollection> {
+  if (existsSync(cachePath)) {
+    return JSON.parse(readFileSync(cachePath, 'utf-8')) as AbsFeatureCollection;
+  }
+
   const url = new URL(ABS_SA1_POPULATION_URL);
   url.searchParams.set('where', "state_name_2021='Australian Capital Territory'");
   url.searchParams.set('outFields', 'sa1_code_2021,sa2_name_2021,tot_p_p');
@@ -104,7 +122,16 @@ export async function buildPopulationSnapshot(): Promise<PopulationSnapshot> {
 
   const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`ABS FeatureServer request failed: ${res.status} ${res.statusText}`);
-  const data = (await res.json()) as AbsFeatureCollection;
+  const raw = await res.text();
+
+  mkdirSync(dirname(cachePath), { recursive: true });
+  writeFileSync(cachePath, raw);
+
+  return JSON.parse(raw) as AbsFeatureCollection;
+}
+
+export async function buildPopulationSnapshot(rootDir: string): Promise<PopulationSnapshot> {
+  const data = await fetchAbsFeatures(resolve(rootDir, CACHE_RELATIVE_PATH));
 
   const cells: PopulationCell[] = [];
   let totalPopulation = 0;
