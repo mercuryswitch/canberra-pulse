@@ -55,12 +55,14 @@ import {
   getNearestStops,
   getScheduledArrival,
   getStopName,
+  getStopsForTrip,
   minutesUntil,
   type NearestStop,
   preloadStopArrivals,
   type Punctuality,
   secondsSinceMidnightNow,
   secondsSinceMidnightOf,
+  type TripStop,
 } from '@/services/stopService';
 
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
@@ -803,6 +805,50 @@ export function CesiumView() {
     // pollTick is the actual trigger for recomputing this each poll.
   }, [nextBusStopId, nearestStops, pollTick]);
 
+  // "Near me for this bus" (2026-09-08, Ross): selecting a vehicle while
+  // Near Me is active re-anchors the same panel to that bus's own upcoming
+  // stops, instead of stops nearest your own location - "if I've clicked
+  // near me, and then clicked on a bus... update the near me pane to show
+  // the newly selected bus and route as opposed to the nearest to me."
+  // Deliberately doesn't touch the vehicle info bar at the bottom (Ross:
+  // "don't change the vehicle bar") - this only affects the Near Me panel
+  // itself, and only while Near Me is on; selecting a vehicle with Near Me
+  // off behaves exactly as before. "Ahead" is measured the same
+  // before/after-along-the-shape way as NextBus above (distanceAlong on
+  // the vehicle's own live shape), not by schedule time - a late-running
+  // bus should still see its real next stop, not whatever the timetable
+  // says should be next.
+  const [vehicleUpcomingStops, setVehicleUpcomingStops] = useState<
+    (TripStop & { distanceAlong: number })[]
+  >([]);
+  useEffect(() => {
+    const bus = selectedId ? busDataRef.current.get(selectedId) : undefined;
+    if (!nearMeActive || !bus) {
+      setVehicleUpcomingStops([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const progress = vehicleProgressRef.current.get(bus.id);
+      const shape = progress ? await getShapeForTrip(bus.tripId) : null;
+      if (!progress || !shape) {
+        if (!cancelled) setVehicleUpcomingStops([]);
+        return;
+      }
+      const tripStops = await getStopsForTrip(bus.tripId);
+      const upcoming = tripStops
+        .map((s) => ({ ...s, distanceAlong: snapToShape(shape, s.lat, s.lon).distanceAlong }))
+        .filter((s) => s.distanceAlong > progress.distanceAlong + PASSED_TOLERANCE_METERS)
+        .sort((a, b) => a.distanceAlong - b.distanceAlong);
+      if (!cancelled) setVehicleUpcomingStops(upcoming);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // busDataRef/vehicleProgressRef are refs; pollTick is the actual
+    // trigger for recomputing this each poll.
+  }, [nearMeActive, selectedId, pollTick]);
+
   // Toggling "Near me" on/off starts/stops the browser's own geolocation
   // watch. watchPosition (not a one-shot getCurrentPosition) so the list and
   // the on-globe marker stay live if you're actually walking around with the
@@ -1375,7 +1421,67 @@ export function CesiumView() {
           </div>
         </div>
       )}
-      {nearMeActive && (
+      {/* "Near me for this bus" (2026-09-08): selecting a vehicle while Near
+          Me is active re-anchors this same panel to that bus's own upcoming
+          stops - see the vehicleUpcomingStops effect above for why. The
+          vehicle info bar at the bottom is untouched either way. */}
+      {nearMeActive && selectedBus && (
+        <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
+          <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100 sticky top-0 bg-white/95">
+            <span className="font-medium truncate">
+              Route {selectedBus.routeId} · Vehicle {selectedBus.id}
+            </span>
+            <button
+              onClick={() => {
+                setSelectedId(null);
+                if (viewerRef.current) viewerRef.current.selectedEntity = undefined;
+              }}
+              className="text-gray-400 hover:text-gray-700 text-xs shrink-0 ml-2 underline decoration-dotted"
+            >
+              Back to near me
+            </button>
+          </div>
+          {vehicleUpcomingStops.length > 0 && (
+            <div className="px-3 py-1.5 border-b border-gray-100 text-[11px] text-gray-400">
+              Now: {formatArrivalClock(secondsSinceMidnightNow())} — arrival times below are offsets
+              from this
+            </div>
+          )}
+          {vehicleUpcomingStops.length === 0 ? (
+            <div className="px-3 py-2 text-gray-400">
+              No upcoming stops found for this trip (may not be in today's schedule)
+            </div>
+          ) : (
+            vehicleUpcomingStops.map((stop) => {
+              const nowSecs = secondsSinceMidnightNow();
+              return (
+                <div
+                  key={stop.stopId}
+                  className="px-3 py-2 border-b border-gray-100 last:border-0 cursor-pointer hover:bg-gray-50"
+                  onClick={() => {
+                    const viewer = viewerRef.current;
+                    if (viewer) {
+                      void viewer.camera.flyTo({
+                        destination: Cartesian3.fromDegrees(stop.lon, stop.lat, 800),
+                        duration: 1.2,
+                      });
+                    }
+                  }}
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-medium truncate">{stop.name}</span>
+                    <span className="text-gray-500 text-xs shrink-0">
+                      {formatArrivalClock(stop.arrivalSeconds)} (+
+                      {minutesUntil(stop.arrivalSeconds, nowSecs)}m)
+                    </span>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+      {nearMeActive && !selectedBus && (
         <div className="absolute top-16 left-4 z-20 w-80 max-h-[70vh] overflow-y-auto bg-white/95 rounded-lg shadow text-sm">
           {userLocation && nearestStops.length > 0 && (
             <div className="px-3 py-1.5 border-b border-gray-100 text-[11px] text-gray-400 sticky top-0 bg-white/95">
