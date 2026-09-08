@@ -9,6 +9,12 @@
   --color-blue-600: oklch(0.546 0.245 262.9);
   --color-blue-700: oklch(0.488 0.243 264.4);
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  /* Headline/label font for the dashboard chrome (panel titles, headline
+     figures, top-bar labels) - kept distinct from body text (Inter) so
+     numbers and section headings read as a deliberate hierarchy rather than
+     everything being the same weight of text. Generates the `font-display`
+     utility class (Tailwind v4 auto-derives one per --font-* theme var). */
+  --font-display: 'Space Grotesk', 'Inter', ui-sans-serif, system-ui, sans-serif;
 }
 
 @layer base {
