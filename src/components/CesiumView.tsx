@@ -272,22 +272,11 @@ export function CesiumView() {
     if (ION_TOKEN) Ion.defaultAccessToken = ION_TOKEN;
 
     const viewer = new Viewer(containerRef.current, {
-      // Dark basemap (2026-09-08, Ross's ask: the default bright OSM tan/
-      // beige tiles were reading as "brown and AI-generated" - a plain
-      // white-card dashboard over a plain bright map has no real design
-      // direction). CARTO's free "Dark Matter" tiles need no API key and
-      // are the same basemap family the Helsinki Rayfin reference template
-      // uses for exactly this look. OpenStreetMapImageryProvider is really
-      // just a generic {z}/{x}/{y} slippy-map fetcher despite the name, so
-      // it works fine pointed at a different tile server.
       baseLayer: ION_TOKEN
         ? undefined
         : ImageryLayer.fromProviderAsync(
             Promise.resolve(
-              new OpenStreetMapImageryProvider({
-                url: 'https://basemaps.cartocdn.com/dark_all/',
-                credit: '© OpenStreetMap contributors © CARTO',
-              }),
+              new OpenStreetMapImageryProvider({ url: 'https://a.tile.openstreetmap.org/' }),
             ),
             {},
           ),
