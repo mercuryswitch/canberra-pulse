@@ -1,4 +1,5 @@
 import {
+  CallbackPositionProperty,
   Cartesian2,
   Cartesian3,
   Color,
@@ -13,12 +14,10 @@ import {
   Ion,
   JulianDate,
   LabelStyle,
-  LinearApproximation,
   Math as CesiumMath,
   OpenStreetMapImageryProvider,
   Quaternion,
   Rectangle,
-  SampledPositionProperty,
   SampledProperty,
   Terrain,
   Transforms,
@@ -42,6 +41,7 @@ import {
   getShapeForTrip,
   getShapeIdForTrip,
   haversineMeters,
+  pointAtDistance,
   preloadShapes,
   shapeOrigin,
   type ShapePoint,
@@ -72,6 +72,17 @@ const ION_TOKEN = import.meta.env.VITE_CESIUM_ION_TOKEN;
 
 const CANBERRA = { lon: 149.13, lat: -35.28, height: 15000 };
 const POLL_MS = 8_000;
+
+// Continuous vehicle motion (2026-09-08) - see the position CallbackProperty
+// in the poll loop for how these get used. A generous upper bound well
+// above any real bus/light rail, so a GPS/snapping blip can't imply an
+// absurd projected speed; and how long to keep coasting on a stale speed
+// estimate before just holding still, comfortably longer than one normal
+// ~8s poll gap (POLL_MS) plus network latency, so an ordinary gap between
+// fixes never causes a visible stall while still not coasting forever if
+// a vehicle genuinely stops reporting.
+const MAX_EXTRAPOLATION_SPEED_MPS = 30; // ~108 km/h
+const COAST_MAX_SECONDS = 30;
 
 // Light rail vehicle IDs follow the "LRV<n>" pattern in this feed; everything
 // else is a bus. Model choice (and, before this, marker color) encodes type.
@@ -198,7 +209,7 @@ export function CesiumView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
   const entitiesRef = useRef<Map<string, Entity>>(new Map());
-  const positionsRef = useRef<Map<string, SampledPositionProperty>>(new Map());
+  const positionsRef = useRef<Map<string, CallbackPositionProperty>>(new Map());
   const orientationsRef = useRef<Map<string, SampledProperty>>(new Map());
   const lastSampleTsRef = useRef<Map<string, number>>(new Map());
   const lastTripIdRef = useRef<Map<string, string>>(new Map());
@@ -209,6 +220,27 @@ export function CesiumView() {
   const vehicleProgressRef = useRef<Map<string, { shapeId: string; distanceAlong: number; routeId: string }>>(
     new Map(),
   );
+  // Continuous vehicle motion (2026-09-08): the position CallbackProperty
+  // below reads this live, every render frame, to project a vehicle's
+  // recent real speed forward *along its own shape* since the last real
+  // fix - see pointAtDistance's doc comment for why. Separate from
+  // vehicleProgressRef above: that one is deliberately absent for an
+  // unmatched trip (bunching should just skip it), but rendering always
+  // needs *something* to draw, hence the fallbackLat/Lon raw-fix escape
+  // hatch when shape is null.
+  const vehicleTrackRef = useRef<
+    Map<
+      string,
+      {
+        shape: ShapePoint[] | null;
+        distanceAlong: number;
+        atTimeMs: number;
+        speedMps: number;
+        fallbackLat: number;
+        fallbackLon: number;
+      }
+    >
+  >(new Map());
   const busDataRef = useRef<Map<string, BusPosition>>(new Map());
   const [needsConnect, setNeedsConnect] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -351,7 +383,10 @@ export function CesiumView() {
   // pale blue or dark red with barely any transition - so this needed to
   // let more of the low/mid range show up as warm, not be compressed
   // further toward cold as the original (inverse) exponent direction did.
-  const [heatmapSensitivity, setHeatmapSensitivity] = useState(1);
+  // Default 25 (halfway across the 1-50 slider) per Ross's 2026-09-08 ask -
+  // was 1 (neutral/linear), which undersold the gradient before anyone
+  // touched the slider.
+  const [heatmapSensitivity, setHeatmapSensitivity] = useState(25);
   const heatmapEntitiesRef = useRef<Entity[]>([]);
   const routeLineEntitiesRef = useRef<Entity[]>([]);
   // #2 on-time performance (2026-09-06): every currently STOPPED_AT vehicle
@@ -1018,48 +1053,52 @@ export function CesiumView() {
             lastTripIdRef.current.set(bus.id, bus.tripId);
           }
 
-          // A SampledPositionProperty holds real fixes over time. REVERSED
-          // 2026-09-08 (was EXTRAPOLATE): Ross caught it directly from a
-          // screenshot - the vehicle marker sitting off in open ground while
-          // the route line curved cleanly through the built-up area right
-          // next to it. Root cause: the browser's clock is always slightly
-          // ahead of the latest real sample (feed/network latency), so the
-          // *displayed* position is always in "past the last sample"
-          // territory - never genuinely interpolating between two real
-          // brackets. EXTRAPOLATE there means Cesium projects motion forward
-          // in a straight Cartesian line from the last known velocity -
-          // literally "as the crow flies" - with zero awareness of the
-          // route shape. Every earlier fix here (tracing real shape vertices
-          // between samples, anchoring the snap search to the vehicle's own
-          // last position) only improved the *historical* samples the
-          // extrapolation then flies straight past - it never touched what
-          // actually renders at any given instant.
+          // Position is a CallbackPositionProperty, not a SampledPositionProperty.
+          // Third rewrite of this same problem in one day (2026-09-08) -
+          // EXTRAPOLATE flew off the route in a straight Cartesian line
+          // ("as the crow flies" - Ross, caught directly from a screenshot);
+          // switching to HOLD then froze the vehicle solid for most of each
+          // ~8s poll gap, only snapping at the moment a new fix landed
+          // ("the movement has stopped completely" - Ross). Both are
+          // symptoms of the same underlying mismatch: Cesium's own
+          // extrapolation only knows straight-line Cartesian motion or no
+          // motion at all - it has no way to keep moving *and* stay
+          // constrained to a curved path.
           //
-          // Ross's ask: "what's the closest point on that route that the
-          // current location matches" at each update, not a velocity-based
-          // guess in between. HOLD does exactly that - the displayed
-          // position is always the last real, route-snapped sample, full
-          // stop, until a genuinely new poll lands and it updates (via the
-          // real-vertex-tracing samples above, so that update itself still
-          // glides along the route rather than jumping). Trade-off, and a
-          // deliberate one per this feedback: motion is no longer perfectly
-          // continuous between polls - a vehicle visibly holds still for
-          // the last second or two before each update, rather than gliding
-          // on a guess. Duration 0 (not a timed cutoff) means hold
-          // indefinitely - matches the orientation property's own existing
-          // HOLD-forever pattern just below, and sidesteps the old
-          // "extrapolate past 5 minutes goes undefined" concern entirely
-          // (nothing to time out when it just holds).
-          let sampledPosition = positionsRef.current.get(bus.id);
-          if (!sampledPosition) {
-            sampledPosition = new SampledPositionProperty();
-            sampledPosition.forwardExtrapolationType = ExtrapolationType.HOLD;
-            sampledPosition.forwardExtrapolationDuration = 0;
-            sampledPosition.setInterpolationOptions({
-              interpolationDegree: 1,
-              interpolationAlgorithm: LinearApproximation,
-            });
-            positionsRef.current.set(bus.id, sampledPosition);
+          // Fix: don't use Cesium's extrapolation at all. This callback re-
+          // evaluates every render frame (the false 2nd arg means "not
+          // constant"), reading the vehicle's live track from
+          // vehicleTrackRef - the real distanceAlong from its last actual
+          // fix, plus a speed estimate from the *previous* real fix before
+          // that (computed below). It projects distance = last distanceAlong
+          // + speed * (time elapsed since that fix), capped at
+          // COAST_MAX_SECONDS, and asks pointAtDistance for the actual
+          // point on the shape at that distance. The vehicle is
+          // *mathematically incapable* of leaving the shape - every point
+          // it can ever be asked to render for is a real point taken
+          // directly from the polyline - while still moving continuously
+          // between real fixes, at a speed grounded in what it was actually
+          // doing a moment ago rather than a guess. Falls back to the last
+          // raw/snapped (lat, lon) directly, no projection, for a trip with
+          // no map-matched shape at all - same graceful degradation as
+          // every other shape-dependent feature in this file.
+          let positionProperty = positionsRef.current.get(bus.id);
+          if (!positionProperty) {
+            const vehicleId = bus.id; // stable string to close over - `bus` itself is a per-poll local
+            positionProperty = new CallbackPositionProperty((time) => {
+              const track = vehicleTrackRef.current.get(vehicleId);
+              if (!track) {
+                const live = busDataRef.current.get(vehicleId);
+                return Cartesian3.fromDegrees(live?.lon ?? 0, live?.lat ?? 0);
+              }
+              if (!track.shape) return Cartesian3.fromDegrees(track.fallbackLon, track.fallbackLat);
+              const nowMs = JulianDate.toDate(time ?? JulianDate.now()).getTime();
+              const elapsedSec = Math.max(0, Math.min((nowMs - track.atTimeMs) / 1000, COAST_MAX_SECONDS));
+              const projected = track.distanceAlong + track.speedMps * elapsedSec;
+              const pt = pointAtDistance(track.shape, projected);
+              return Cartesian3.fromDegrees(pt.lon, pt.lat);
+            }, false);
+            positionsRef.current.set(bus.id, positionProperty);
           }
 
           // Orientation from the feed's own reported bearing, not derived
@@ -1079,13 +1118,13 @@ export function CesiumView() {
             orientationsRef.current.set(bus.id, sampledOrientation);
           }
 
-          // Only add a sample when the feed's own reported timestamp has
+          // Only process a sample when the feed's own reported timestamp has
           // actually advanced - a repeat poll of an unchanged fix shouldn't
-          // reset the velocity estimate Cesium derives between samples.
+          // reset the speed estimate the position callback above relies on.
           if (lastSampleTsRef.current.get(bus.id) !== bus.ts) {
-            // Captured before any of the refs below get overwritten this
+            // Captured before either ref below gets overwritten this
             // iteration - this is genuinely the *previous* poll's state,
-            // needed to trace a path between it and the new fix.
+            // needed to derive a speed between it and the new fix.
             const prevTs = lastSampleTsRef.current.get(bus.id);
             const prevProgress = vehicleProgressRef.current.get(bus.id);
 
@@ -1097,6 +1136,9 @@ export function CesiumView() {
             let lat = bus.lat;
             let lon = bus.lon;
             const shape = await getShapeForTrip(bus.tripId);
+            let trackShape: ShapePoint[] | null = null;
+            let trackDistanceAlong = 0;
+            let trackSpeedMps = 0;
             if (shape) {
               const shapeId = await getShapeIdForTrip(bus.tripId);
               // Anchor the search to where this vehicle was last, when we
@@ -1111,46 +1153,22 @@ export function CesiumView() {
               const snapped = snapToShape(shape, bus.lat, bus.lon, nearHint);
               lat = snapped.lat;
               lon = snapped.lon;
+              trackShape = shape;
+              trackDistanceAlong = snapped.distanceAlong;
 
-              // Snapping both endpoints onto the shape isn't enough on its
-              // own - SampledPositionProperty only knows straight-line
-              // Cartesian interpolation *between* samples, so two points
-              // that are each genuinely on the route can still have a
-              // straight chord between them that visibly cuts across a
-              // bend if the road curves between two polls. Ross (2026-09-
-              // 08): "the route should show a series of points... it
-              // should just be an update of the position on that track."
-              // Fix: walk every real shape vertex the vehicle passed
-              // between the previous snapped position and this one, and
-              // add each as its own sample with a time interpolated
-              // proportionally to distance travelled - Cesium then draws
-              // short straight segments between closely-spaced real
-              // vertices instead of one long chord, which hugs the actual
-              // polyline instead of cutting across it. Guarded to only
-              // fire when this is genuinely a continuation of the same
-              // shape moving forward (same shape_id, distance increasing,
-              // a real previous timestamp to interpolate from) - anything
-              // else (trip just changed, first-ever fix, backward/noisy
-              // snap) falls straight through to the single-sample
-              // behaviour below, same as before this fix.
-              if (
-                shapeId &&
-                prevProgress &&
-                prevProgress.shapeId === shapeId &&
-                prevTs != null &&
-                snapped.distanceAlong > prevProgress.distanceAlong
-              ) {
-                const prevJulian = JulianDate.fromDate(new Date(prevTs));
-                const totalDist = snapped.distanceAlong - prevProgress.distanceAlong;
-                const totalSeconds = JulianDate.secondsDifference(sampleTime, prevJulian);
-                if (totalSeconds > 0) {
-                  for (const pt of shape) {
-                    if (pt.dist <= prevProgress.distanceAlong) continue;
-                    if (pt.dist >= snapped.distanceAlong) break;
-                    const frac = (pt.dist - prevProgress.distanceAlong) / totalDist;
-                    const midTime = JulianDate.addSeconds(prevJulian, totalSeconds * frac, new JulianDate());
-                    sampledPosition.addSample(midTime, Cartesian3.fromDegrees(pt.lon, pt.lat));
-                  }
+              // Real speed from the last two same-shape fixes, feeding the
+              // position callback above so it can keep the vehicle moving
+              // between polls instead of holding still. Clamped: a GPS/
+              // snapping blip shouldn't imply an absurd speed (generous
+              // upper bound, comfortably above any real bus/light rail),
+              // and a decrease - noise, or the first poll of a new trip
+              // where prevProgress's shapeId won't match - just means
+              // "don't move yet" (0) rather than going backward.
+              if (shapeId && prevProgress && prevProgress.shapeId === shapeId && prevTs != null) {
+                const elapsedSec = (bus.ts - prevTs) / 1000;
+                const distDelta = snapped.distanceAlong - prevProgress.distanceAlong;
+                if (elapsedSec > 0 && distDelta > 0) {
+                  trackSpeedMps = Math.min(distDelta / elapsedSec, MAX_EXTRAPOLATION_SPEED_MPS);
                 }
               }
 
@@ -1164,9 +1182,17 @@ export function CesiumView() {
             } else {
               vehicleProgressRef.current.delete(bus.id);
             }
-            const position = Cartesian3.fromDegrees(lon, lat);
 
-            sampledPosition.addSample(sampleTime, position);
+            vehicleTrackRef.current.set(bus.id, {
+              shape: trackShape,
+              distanceAlong: trackDistanceAlong,
+              atTimeMs: bus.ts,
+              speedMps: trackSpeedMps,
+              fallbackLat: lat,
+              fallbackLon: lon,
+            });
+
+            const position = Cartesian3.fromDegrees(lon, lat);
             const heading = CesiumMath.toRadians(bus.bearing + MODEL_HEADING_OFFSET_DEG);
             const hpr = new HeadingPitchRoll(heading, 0, 0);
             sampledOrientation.addSample(
@@ -1179,7 +1205,7 @@ export function CesiumView() {
           if (!entitiesRef.current.has(bus.id)) {
             const entity = viewer.entities.add({
               id: bus.id,
-              position: sampledPosition,
+              position: positionProperty,
               orientation: sampledOrientation,
               name: `Vehicle ${bus.id} (route ${bus.routeId})`,
               // RESOLVED (2026-08-25 night): the "model never renders for
@@ -1227,6 +1253,7 @@ export function CesiumView() {
             lastSampleTsRef.current.delete(id);
             lastTripIdRef.current.delete(id);
             vehicleProgressRef.current.delete(id);
+            vehicleTrackRef.current.delete(id);
           }
         }
       } catch (err) {
