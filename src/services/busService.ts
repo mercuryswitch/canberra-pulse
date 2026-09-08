@@ -10,9 +10,15 @@ export interface BusPosition {
   status: string;
   ts: number;
   /**
-   * Which stop the vehicle is at/approaching, when known - powers #2
-   * on-time performance. Only populated for rows ingested since 2026-09-06
-   * (when this column was added); older/never-set rows come back as ''.
+   * Which stop the vehicle is at, when known - powers #2 on-time performance
+   * and the vehicle panel's "at stop" display. EventSchemaBUS_v1's own
+   * stop_id column is always empty in practice - the Eventstream's CloudEvents
+   * schema registry silently rejects any message carrying a field outside
+   * its original registered shape, confirmed by direct test (2026-09-07).
+   * Real values come from a join against BusStopObservations instead, a
+   * small table fed by a separate, isolated notebook (ACTStopIdLoader) that
+   * talks to Kusto directly and never touches the Eventstream at all - see
+   * fetchStopObservations below.
    */
   stopId: string;
 }
@@ -34,9 +40,45 @@ EventSchemaBUS_v1
 | project vehicle_id, route_id, trip_id, latitude, longitude, bearing, current_status, stop_id, ts
 `;
 
+// BusStopObservations is fed by ACTStopIdLoader, a small notebook that talks
+// to Kusto directly - see the stopId doc comment on BusPosition above for
+// why this exists instead of just reading stop_id off EventSchemaBUS_v1
+// itself. Window is short (not the 5m ACTIVE_WINDOW used for positions):
+// this table only ever gets a row while a vehicle is actually STOPPED_AT a
+// stop, so a short window keeps a vehicle that left the stop minutes ago
+// from still showing a stale "at stop" - the consumers of BusPosition.stopId
+// already gate on the vehicle's *current* status being STOPPED_AT too, but
+// there's no reason to carry a stale match longer than it could plausibly
+// still be true.
+const STOP_OBS_WINDOW = '2m';
+
+const STOP_OBSERVATIONS_KQL = `
+BusStopObservations
+| where ts > now() - ${STOP_OBS_WINDOW}
+| summarize arg_max(ts, stop_id) by vehicle_id
+`;
+
+/** Latest known stop_id per vehicle, from the direct-to-Kusto path (see stopId doc above). */
+async function fetchStopObservations(signal?: AbortSignal): Promise<Map<string, string>> {
+  const t = await queryKusto(STOP_OBSERVATIONS_KQL, signal);
+  const iVehicle = colIndex(t, 'vehicle_id');
+  const iStop = colIndex(t, 'stop_id');
+  const map = new Map<string, string>();
+  for (const r of t.Rows) {
+    const stop = r[iStop] == null ? '' : String(r[iStop]);
+    if (stop) map.set(String(r[iVehicle]), stop);
+  }
+  return map;
+}
+
 /** Fetch the latest position of every currently-active bus/light rail vehicle. */
 export async function fetchBuses(signal?: AbortSignal): Promise<BusFeed> {
-  const t = await queryKusto(BUSES_KQL, signal);
+  const [t, stopObs] = await Promise.all([
+    queryKusto(BUSES_KQL, signal),
+    // Never let a problem with this secondary table take down the main
+    // position feed - worst case we just show no stop name, same as today.
+    fetchStopObservations(signal).catch(() => new Map<string, string>()),
+  ]);
   const iId = colIndex(t, 'vehicle_id');
   const iRoute = colIndex(t, 'route_id');
   const iTrip = colIndex(t, 'trip_id');
@@ -46,17 +88,21 @@ export async function fetchBuses(signal?: AbortSignal): Promise<BusFeed> {
   const iStatus = colIndex(t, 'current_status');
   const iStopId = colIndex(t, 'stop_id');
   const iTs = colIndex(t, 'ts');
-  const buses = t.Rows.map((r) => ({
-    id: String(r[iId]),
-    routeId: String(r[iRoute]),
-    tripId: String(r[iTrip]),
-    lat: Number(r[iLat]),
-    lon: Number(r[iLon]),
-    bearing: Number(r[iBearing]),
-    status: r[iStatus] == null ? '' : String(r[iStatus]),
-    stopId: r[iStopId] == null ? '' : String(r[iStopId]),
-    ts: new Date(String(r[iTs])).getTime(),
-  })).filter((b) => Number.isFinite(b.lat) && Number.isFinite(b.lon));
+  const buses = t.Rows.map((r) => {
+    const id = String(r[iId]);
+    const ownStopId = r[iStopId] == null ? '' : String(r[iStopId]);
+    return {
+      id,
+      routeId: String(r[iRoute]),
+      tripId: String(r[iTrip]),
+      lat: Number(r[iLat]),
+      lon: Number(r[iLon]),
+      bearing: Number(r[iBearing]),
+      status: r[iStatus] == null ? '' : String(r[iStatus]),
+      stopId: ownStopId || stopObs.get(id) || '',
+      ts: new Date(String(r[iTs])).getTime(),
+    };
+  }).filter((b) => Number.isFinite(b.lat) && Number.isFinite(b.lon));
   return { asOf: new Date().toISOString(), buses };
 }
 
