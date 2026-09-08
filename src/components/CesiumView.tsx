@@ -34,7 +34,7 @@ import {
   HEATMAP_GRID_DEGREES,
   type HeatmapCell,
 } from '@/services/busService';
-import { resumePendingTriggerIfAny, triggerBusEventLoader } from '@/services/fabricJobsService';
+import { resumePendingTriggerIfAny, triggerDataLoaders } from '@/services/fabricJobsService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
 import { getPopulationCells, preloadPopulation, type PopulationCell } from '@/services/populationService';
 import {
@@ -272,11 +272,22 @@ export function CesiumView() {
     if (ION_TOKEN) Ion.defaultAccessToken = ION_TOKEN;
 
     const viewer = new Viewer(containerRef.current, {
+      // Dark basemap (2026-09-08, Ross's ask: the default bright OSM tan/
+      // beige tiles were reading as "brown and AI-generated" - a plain
+      // white-card dashboard over a plain bright map has no real design
+      // direction). CARTO's free "Dark Matter" tiles need no API key and
+      // are the same basemap family the Helsinki Rayfin reference template
+      // uses for exactly this look. OpenStreetMapImageryProvider is really
+      // just a generic {z}/{x}/{y} slippy-map fetcher despite the name, so
+      // it works fine pointed at a different tile server.
       baseLayer: ION_TOKEN
         ? undefined
         : ImageryLayer.fromProviderAsync(
             Promise.resolve(
-              new OpenStreetMapImageryProvider({ url: 'https://a.tile.openstreetmap.org/' }),
+              new OpenStreetMapImageryProvider({
+                url: 'https://basemaps.cartocdn.com/dark_all/',
+                credit: '© OpenStreetMap contributors © CARTO',
+              }),
             ),
             {},
           ),
@@ -1539,11 +1550,14 @@ export function CesiumView() {
     { label: '>10', min: 10, max: Infinity, color: '#dc2626' },
   ];
 
-  // "Load live data" button (2026-09-08, Ross's ask) - triggers
-  // ACTBusEventLoader's 20-minute run directly from the app, so a stale/
-  // idle feed doesn't need a separate Fabric portal visit to restart.
-  // ACTBusEventLoader only - see fabricJobsService.ts's doc comment for why
-  // ACTStopIdLoader isn't wired up here yet.
+  // "Load live data" button (2026-09-08, Ross's ask) - one button, dual
+  // function (also Ross's explicit ask): starts ACTBusEventLoader
+  // (positions/routes/heat map/near-me) and ACTStopIdLoader (stop_id +
+  // delay_minutes - on-time performance, the gauge/histogram panel, "at
+  // stop" info) together, directly from the app. See fabricJobsService.ts
+  // for why both are safely job-triggerable now (a custom Environment
+  // removed the runtime pip install that used to break ACTStopIdLoader's
+  // job-triggered runs).
   const [loaderStatus, setLoaderStatus] = useState<{ text: string; isError: boolean } | null>(null);
   const [loaderBusy, setLoaderBusy] = useState(false);
   // Resumes a trigger interrupted by the one-time consent redirect (see
@@ -1552,7 +1566,7 @@ export function CesiumView() {
   useEffect(() => {
     void resumePendingTriggerIfAny()
       .then((result) => {
-        if (result) setLoaderStatus({ text: result.message, isError: false });
+        if (result) setLoaderStatus({ text: result.message, isError: result.isError });
       })
       .catch((err: Error) => setLoaderStatus({ text: err.message, isError: true }));
   }, []);
@@ -1560,13 +1574,13 @@ export function CesiumView() {
     setLoaderBusy(true);
     setLoaderStatus(null);
     try {
-      const result = await triggerBusEventLoader();
-      setLoaderStatus({ text: result.message, isError: false });
+      const result = await triggerDataLoaders();
+      setLoaderStatus({ text: result.message, isError: result.isError });
     } catch (err) {
       setLoaderStatus({ text: (err as Error).message, isError: true });
     } finally {
       setLoaderBusy(false);
-      setTimeout(() => setLoaderStatus(null), 8000);
+      setTimeout(() => setLoaderStatus(null), 10000);
     }
   }
 
@@ -1580,7 +1594,7 @@ export function CesiumView() {
           className="bg-white/90 rounded-lg px-3 py-2 text-sm text-gray-700 shadow hover:bg-gray-100 disabled:opacity-50 flex items-center gap-1.5"
         >
           <span aria-hidden>▶️</span>
-          {loaderBusy ? 'Starting…' : 'Load live data (20 min)'}
+          {loaderBusy ? 'Starting…' : 'Load live data (positions + on-time)'}
         </button>
         {loaderStatus && (
           <div
