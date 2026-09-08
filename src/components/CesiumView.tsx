@@ -344,8 +344,20 @@ export function CesiumView() {
 
     // Drive our own side panel off Cesium's selection state, rather than its
     // built-in infoBox, so the panel matches the app's own visual style.
+    // Route-line entities (2026-09-08, Ross's ask: "click on one by
+    // location... rather than just the drop-down list") are tagged with a
+    // `routeline:` id prefix specifically so this same listener can tell
+    // them apart from a vehicle click and route it to setRouteFilter
+    // instead of treating it as a vehicle selection.
     viewer.selectedEntityChanged.addEventListener((entity) => {
-      setSelectedId(entity ? String(entity.id) : null);
+      const id = entity ? String(entity.id) : null;
+      if (id?.startsWith('routeline:')) {
+        const routeId = id.split(':')[1];
+        if (routeId) setRouteFilter(routeId);
+        viewer.selectedEntity = undefined; // don't leave the line itself "selected"
+        return;
+      }
+      setSelectedId(id);
     });
 
     return () => {
@@ -805,11 +817,17 @@ export function CesiumView() {
   // Draw the actual route line(s) as a visible overlay (2026-09-05, Ross's
   // ask) - a direct visual answer to "are vehicles actually locked to their
   // route", using the exact same shape data already used for map-matching,
-  // not a separate/approximate line. Two triggers: selecting a single
-  // vehicle draws just that vehicle's own shape; selecting a route via the
-  // Routes navigator draws every distinct shape currently in use by that
-  // route's active vehicles (a route_id can have more than one - different
-  // directions are different shapes).
+  // not a separate/approximate line. Three triggers: selecting a single
+  // vehicle draws just that vehicle's own shape; picking a specific route
+  // from the Routes navigator draws every distinct shape currently in use
+  // by that route's active vehicles (a route_id can have more than one -
+  // different directions are different shapes); opening the Routes
+  // navigator *without* picking one yet (2026-09-08, Ross's ask: "show all
+  // routes overlaid on the map so... you can select it there also, rather
+  // than just the drop-down list") draws every distinct shape any active
+  // vehicle is currently on, each one clickable - see the `routeline:`-
+  // prefixed id below and the selectedEntityChanged listener that reacts
+  // to it by setting routeFilter, same as picking from the list would.
   useEffect(() => {
     if (!viewerRef.current) return;
     let cancelled = false;
@@ -817,19 +835,25 @@ export function CesiumView() {
     async function draw() {
       const viewer = viewerRef.current;
       if (!viewer) return;
-      const shapeIds = new Set<string>();
+      // shapeId -> routeId, so a clicked line knows which route to select.
+      const shapeToRoute = new Map<string, string>();
       if (routeFilter) {
         for (const p of vehicleProgressRef.current.values()) {
-          if (p.routeId === routeFilter) shapeIds.add(p.shapeId);
+          if (p.routeId === routeFilter) shapeToRoute.set(p.shapeId, p.routeId);
+        }
+      } else if (showRoutesList) {
+        for (const p of vehicleProgressRef.current.values()) {
+          if (!shapeToRoute.has(p.shapeId)) shapeToRoute.set(p.shapeId, p.routeId);
         }
       } else if (selectedBus) {
         const shapeId = await getShapeIdForTrip(selectedBus.tripId);
-        if (shapeId) shapeIds.add(shapeId);
+        if (shapeId) shapeToRoute.set(shapeId, selectedBus.routeId);
       }
 
       const shapes = await Promise.all(
-        Array.from(shapeIds).map(async (shapeId) => ({
+        Array.from(shapeToRoute.entries()).map(async ([shapeId, routeId]) => ({
           shapeId,
+          routeId,
           points: await getShapeById(shapeId),
         })),
       );
@@ -837,9 +861,14 @@ export function CesiumView() {
 
       for (const entity of routeLineEntitiesRef.current) viewer.entities.remove(entity);
       routeLineEntitiesRef.current = shapes
-        .filter((s): s is { shapeId: string; points: NonNullable<typeof s.points> } => !!s.points)
+        .filter((s): s is typeof s & { points: NonNullable<typeof s.points> } => !!s.points)
         .map((s) =>
           viewer.entities.add({
+            // shapeId suffix keeps this unique even when a route has more
+            // than one shape (multiple directions/patterns) drawn at once
+            // in the "show all routes" case - Cesium requires unique
+            // entity ids, and a route_id alone isn't one here.
+            id: `routeline:${s.routeId}:${s.shapeId}`,
             polyline: {
               positions: Cartesian3.fromDegreesArray(
                 s.points.flatMap((p) => [p.lon, p.lat]),
@@ -861,9 +890,9 @@ export function CesiumView() {
       routeLineEntitiesRef.current = [];
     };
     // vehicleProgressRef is a ref (no lint complaint about it as a missing
-    // dep); pollTick keeps the route-filter case's shape set current as
-    // vehicles come and go.
-  }, [routeFilter, selectedBus, pollTick]);
+    // dep); pollTick keeps the drawn shape set current as vehicles come
+    // and go.
+  }, [routeFilter, showRoutesList, selectedBus, pollTick]);
 
   // The poll loop below has an empty dependency array (it's a long-lived
   // interval, not something to restart on every filter click), so it reads
