@@ -1038,10 +1038,19 @@ export function CesiumView() {
             let lon = bus.lon;
             const shape = await getShapeForTrip(bus.tripId);
             if (shape) {
-              const snapped = snapToShape(shape, bus.lat, bus.lon);
+              const shapeId = await getShapeIdForTrip(bus.tripId);
+              // Anchor the search to where this vehicle was last, when we
+              // have a same-shape previous fix to anchor to - see
+              // snapToShape's own doc comment for why a pure global-
+              // nearest search can snap to the wrong stretch of a curvy
+              // road that loops back near itself.
+              const nearHint =
+                prevProgress && shapeId === prevProgress.shapeId
+                  ? prevProgress.distanceAlong
+                  : undefined;
+              const snapped = snapToShape(shape, bus.lat, bus.lon, nearHint);
               lat = snapped.lat;
               lon = snapped.lon;
-              const shapeId = await getShapeIdForTrip(bus.tripId);
 
               // Snapping both endpoints onto the shape isn't enough on its
               // own - SampledPositionProperty only knows straight-line
