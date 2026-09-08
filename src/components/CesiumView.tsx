@@ -34,6 +34,7 @@ import {
   HEATMAP_GRID_DEGREES,
   type HeatmapCell,
 } from '@/services/busService';
+import { triggerBusEventLoader } from '@/services/fabricJobsService';
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
 import { getPopulationCells, preloadPopulation, type PopulationCell } from '@/services/populationService';
 import {
@@ -1538,9 +1539,49 @@ export function CesiumView() {
     { label: '>10', min: 10, max: Infinity, color: '#dc2626' },
   ];
 
+  // "Load live data" button (2026-09-08, Ross's ask) - triggers
+  // ACTBusEventLoader's 20-minute run directly from the app, so a stale/
+  // idle feed doesn't need a separate Fabric portal visit to restart.
+  // ACTBusEventLoader only - see fabricJobsService.ts's doc comment for why
+  // ACTStopIdLoader isn't wired up here yet.
+  const [loaderStatus, setLoaderStatus] = useState<{ text: string; isError: boolean } | null>(null);
+  const [loaderBusy, setLoaderBusy] = useState(false);
+  async function handleTriggerLoader() {
+    setLoaderBusy(true);
+    setLoaderStatus(null);
+    try {
+      const result = await triggerBusEventLoader();
+      setLoaderStatus({ text: result.message, isError: false });
+    } catch (err) {
+      setLoaderStatus({ text: (err as Error).message, isError: true });
+    } finally {
+      setLoaderBusy(false);
+      setTimeout(() => setLoaderStatus(null), 8000);
+    }
+  }
+
   return (
     <div className="relative w-full h-screen">
       <div ref={containerRef} className="w-full h-full" />
+      <div className="absolute top-4 right-4 z-20 flex flex-col items-end gap-1">
+        <button
+          onClick={() => void handleTriggerLoader()}
+          disabled={loaderBusy}
+          className="bg-white/90 rounded-lg px-3 py-2 text-sm text-gray-700 shadow hover:bg-gray-100 disabled:opacity-50 flex items-center gap-1.5"
+        >
+          <span aria-hidden>▶️</span>
+          {loaderBusy ? 'Starting…' : 'Load live data (20 min)'}
+        </button>
+        {loaderStatus && (
+          <div
+            className={`text-xs px-2 py-1 rounded shadow max-w-64 text-right ${
+              loaderStatus.isError ? 'bg-red-50 text-red-700' : 'bg-white/90 text-gray-600'
+            }`}
+          >
+            {loaderStatus.text}
+          </div>
+        )}
+      </div>
       <div className="absolute top-4 left-4 bg-white/90 rounded-lg px-2 py-2 text-sm text-gray-700 shadow flex items-center gap-1">
         <button
           onClick={() => {
