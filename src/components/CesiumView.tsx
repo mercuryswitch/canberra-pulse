@@ -1023,6 +1023,12 @@ export function CesiumView() {
           // actually advanced - a repeat poll of an unchanged fix shouldn't
           // reset the velocity estimate Cesium derives between samples.
           if (lastSampleTsRef.current.get(bus.id) !== bus.ts) {
+            // Captured before any of the refs below get overwritten this
+            // iteration - this is genuinely the *previous* poll's state,
+            // needed to trace a path between it and the new fix.
+            const prevTs = lastSampleTsRef.current.get(bus.id);
+            const prevProgress = vehicleProgressRef.current.get(bus.id);
+
             // Map-match onto the trip's actual route geometry when we have
             // it, so the vehicle sits on the road/track instead of
             // wherever raw GPS noise placed it. Falls back to the raw fix
@@ -1036,6 +1042,49 @@ export function CesiumView() {
               lat = snapped.lat;
               lon = snapped.lon;
               const shapeId = await getShapeIdForTrip(bus.tripId);
+
+              // Snapping both endpoints onto the shape isn't enough on its
+              // own - SampledPositionProperty only knows straight-line
+              // Cartesian interpolation *between* samples, so two points
+              // that are each genuinely on the route can still have a
+              // straight chord between them that visibly cuts across a
+              // bend if the road curves between two polls. Ross (2026-09-
+              // 08): "the route should show a series of points... it
+              // should just be an update of the position on that track."
+              // Fix: walk every real shape vertex the vehicle passed
+              // between the previous snapped position and this one, and
+              // add each as its own sample with a time interpolated
+              // proportionally to distance travelled - Cesium then draws
+              // short straight segments between closely-spaced real
+              // vertices instead of one long chord, which hugs the actual
+              // polyline instead of cutting across it. Guarded to only
+              // fire when this is genuinely a continuation of the same
+              // shape moving forward (same shape_id, distance increasing,
+              // a real previous timestamp to interpolate from) - anything
+              // else (trip just changed, first-ever fix, backward/noisy
+              // snap) falls straight through to the single-sample
+              // behaviour below, same as before this fix.
+              if (
+                shapeId &&
+                prevProgress &&
+                prevProgress.shapeId === shapeId &&
+                prevTs != null &&
+                snapped.distanceAlong > prevProgress.distanceAlong
+              ) {
+                const prevJulian = JulianDate.fromDate(new Date(prevTs));
+                const totalDist = snapped.distanceAlong - prevProgress.distanceAlong;
+                const totalSeconds = JulianDate.secondsDifference(sampleTime, prevJulian);
+                if (totalSeconds > 0) {
+                  for (const pt of shape) {
+                    if (pt.dist <= prevProgress.distanceAlong) continue;
+                    if (pt.dist >= snapped.distanceAlong) break;
+                    const frac = (pt.dist - prevProgress.distanceAlong) / totalDist;
+                    const midTime = JulianDate.addSeconds(prevJulian, totalSeconds * frac, new JulianDate());
+                    sampledPosition.addSample(midTime, Cartesian3.fromDegrees(pt.lon, pt.lat));
+                  }
+                }
+              }
+
               if (shapeId) {
                 vehicleProgressRef.current.set(bus.id, {
                   shapeId,
