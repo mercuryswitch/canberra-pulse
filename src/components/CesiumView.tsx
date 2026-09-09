@@ -2221,13 +2221,31 @@ export function CesiumView() {
           ask: "make the blocks separate and not joined") - was one
           continuous divide-x strip. */}
       <div className="flex items-stretch gap-2 px-3 py-2 border-b border-white/10 shrink-0 overflow-x-auto">
+        {/* Split into Bus/Light rail (2026-09-09, Ross's ask: "a tile for
+            Bus and Light rail... not both") - was one combined "Vehicles"
+            card. No "available" (total fleet size) figure exists to pair
+            with "active" here - GTFS doesn't model physical vehicles at
+            all, only trips/routes/schedules, so there's no static fleet
+            count anywhere in this app's data to compare the live count
+            against (unlike Routes, where the static schedule genuinely
+            does enumerate every route_id). Each card's number is the live
+            count only - honestly labelled as that, not paired with a
+            fabricated "available" figure. */}
         <CounterCard
           icon="🚌"
-          label="Vehicles"
-          value={String(busCount + railCount)}
-          sub={`${busCount} bus · ${railCount} rail`}
-          active={activeTab() === null}
-          onClick={() => selectTab(null)}
+          label="Bus"
+          value={String(busCount)}
+          sub="active now"
+          active={activeTab() === 'bus'}
+          onClick={() => selectTab('bus')}
+        />
+        <CounterCard
+          icon="🚈"
+          label="Light rail"
+          value={String(railCount)}
+          sub="active now"
+          active={activeTab() === 'rail'}
+          onClick={() => selectTab('rail')}
         />
         <CounterCard
           icon="⏱"
