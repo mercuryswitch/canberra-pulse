@@ -352,17 +352,26 @@ export function CesiumView() {
     // stopped working) - nothing else in this file ever touches the camera
     // controller, so this should already be Cesium's stock default. Setting
     // it outright rather than leaving it implicit at least rules out any
-    // future change silently drifting away from it, and Ctrl+right-drag is
-    // added as a second binding since it costs nothing. Cesium's input
-    // system only recognises Ctrl/Shift/Alt as modifiers - Cmd/Meta was
-    // never wired to anything, which may explain why trying it felt broken.
+    // future change silently drifting away from it. Cesium's input system
+    // only recognises Ctrl/Shift/Alt as modifiers - Cmd/Meta was never
+    // wired to anything, which may explain why trying it felt broken.
     // The on-screen Tilt buttons below are the real fix: they work
     // regardless of modifier keys, OS trackpad settings, or browser quirks.
+    //
+    // Ctrl+right-drag was briefly added here too "since it costs nothing" -
+    // it wasn't free. Cesium's own *default* lookEventTypes already binds
+    // Ctrl+right-drag to a completely different camera action ("look":
+    // rotate in place around the camera's own position, vs. tilt's orbit
+    // around a fixed ground point). Registering the same input combination
+    // against two different actions is exactly the kind of thing that can
+    // make camera controls feel randomly broken - only one of the two ever
+    // wins, and not necessarily consistently. Left out entirely now;
+    // Ctrl+left-drag alone matches Cesium's real stock default with no
+    // collision against anything else it also binds by default.
     viewer.scene.screenSpaceCameraController.tiltEventTypes = [
       CameraEventType.MIDDLE_DRAG,
       CameraEventType.PINCH,
       { eventType: CameraEventType.LEFT_DRAG, modifier: KeyboardEventModifier.CTRL },
-      { eventType: CameraEventType.RIGHT_DRAG, modifier: KeyboardEventModifier.CTRL },
     ];
     viewerRef.current = viewer;
     // Debug aid only - lets DevTools console inspect live entity/viewer
