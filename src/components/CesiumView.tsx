@@ -243,15 +243,15 @@ function CounterCard({
   return (
     <button
       onClick={onClick}
-      className={`flex flex-col items-start gap-0.5 px-4 py-2 text-left min-w-[150px] shrink-0 transition-colors ${
-        active ? 'bg-sky-500/20' : 'hover:bg-white/5'
+      className={`flex flex-col items-start gap-0.5 px-4 py-2 text-left min-w-[150px] shrink-0 rounded-[5px] border transition-colors ${
+        active ? 'bg-sky-500/20 border-sky-500/40' : 'bg-white/5 border-white/10 hover:bg-white/10'
       }`}
     >
       <div className="font-display flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-white/40">
         <span aria-hidden>{icon}</span>
         {label}
       </div>
-      <div className="font-display text-xl font-semibold text-white/90">{value}</div>
+      <div className="font-display text-xl font-semibold text-white">{value}</div>
       {sub && <div className="text-[11px] text-white/40 truncate w-full">{sub}</div>}
     </button>
   );
@@ -2079,8 +2079,11 @@ export function CesiumView() {
           still further down. Backing data (population/traffic/on-time) now
           fetches unconditionally at startup instead of lazily on tab-open -
           see the widened useEffects above - so these numbers are live from
-          the first poll, not just placeholders until a tab is opened once. */}
-      <div className="flex items-stretch divide-x divide-white/10 border-b border-white/10 shrink-0 overflow-x-auto">
+          the first poll, not just placeholders until a tab is opened once.
+          Separate rounded tiles with gaps between them (2026-09-09, Ross's
+          ask: "make the blocks separate and not joined") - was one
+          continuous divide-x strip. */}
+      <div className="flex items-stretch gap-2 px-3 py-2 border-b border-white/10 shrink-0 overflow-x-auto">
         <CounterCard
           icon="🚌"
           label="Vehicles"
@@ -2308,7 +2311,7 @@ export function CesiumView() {
             <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
               <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network activity</div>
               <div className="flex items-baseline justify-between">
-                <span className="font-display text-lg font-semibold text-white/90">
+                <span className="font-display text-lg font-semibold text-white">
                   {heatHeadline.activeCells}
                   <span className="text-xs text-white/40 font-normal"> / {heatHeadline.totalCells} cells active</span>
                 </span>
@@ -2480,7 +2483,7 @@ export function CesiumView() {
               <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network congestion</div>
               <div className="flex items-baseline justify-between">
                 <span
-                  className={`font-display text-lg font-semibold ${congestionHeadline.avgScore >= 1 ? 'text-orange-600' : 'text-white/90'}`}
+                  className={`font-display text-lg font-semibold ${congestionHeadline.avgScore >= 1 ? 'text-orange-600' : 'text-white'}`}
                 >
                   {congestionHeadline.avgScore.toFixed(1)}
                   <span className="text-xs text-white/40 font-normal"> avg score</span>
@@ -2513,7 +2516,7 @@ export function CesiumView() {
                       });
                     }
                   }}
-                  className="w-full px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0 text-red-800 font-medium truncate"
+                  className="w-full px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0 text-red-400 font-medium truncate"
                 >
                   {link.name}
                 </button>
@@ -2680,7 +2683,7 @@ export function CesiumView() {
                                   const viewer = viewerRef.current;
                                   if (entity && viewer) void viewer.flyTo(entity);
                                 }}
-                                className="text-green-600 hover:text-green-700 font-medium truncate underline decoration-dotted"
+                                className="text-green-600 hover:text-green-400 font-medium truncate underline decoration-dotted"
                               >
                                 🔴 Live · ~{formatDistance(live.distanceMeters)} away
                               </button>
@@ -2813,7 +2816,7 @@ export function CesiumView() {
           <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
             <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Active routes</div>
             <div className="flex items-baseline justify-between">
-              <span className="font-display text-lg font-semibold text-white/90">{routeCounts.length}</span>
+              <span className="font-display text-lg font-semibold text-white">{routeCounts.length}</span>
               <span className="text-xs text-white/40">
                 {routeCounts.reduce((sum, r) => sum + r.count, 0)} vehicles total
               </span>
@@ -2853,7 +2856,7 @@ export function CesiumView() {
           <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
             <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Bunching alerts</div>
             <span
-              className={`font-display text-lg font-semibold ${bunchingAlerts.length > 0 ? 'text-amber-600' : 'text-white/90'}`}
+              className={`font-display text-lg font-semibold ${bunchingAlerts.length > 0 ? 'text-amber-600' : 'text-white'}`}
             >
               {bunchingAlerts.length}
             </span>
