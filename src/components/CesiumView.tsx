@@ -1323,6 +1323,59 @@ export function CesiumView() {
   // a secondary, right-aligned detail. Route order is by count (busiest
   // route first) since that's usually more useful to scan than alphabetical;
   // vehicle IDs within a route stay alphabetical.
+  // Direction per trip (2026-09-09, Ross's ask: nest by direction too, not
+  // just route) - shapeId is the reliable "same route, same direction"
+  // signal already trusted for bunching (a route_id can have more than one
+  // physical pattern per direction, but two trips sharing a shape_id are
+  // always the same one), so it's the grouping key; headsign is just the
+  // friendly label for whichever shapeId a vehicle resolves to. Both are
+  // already-loaded static lookups (route-shapes.json, preloaded at
+  // startup) - resolving them is an in-memory map read behind a
+  // resolved promise, not a network call, so doing it for every visible
+  // vehicle each poll is cheap.
+  const [tripDirections, setTripDirections] = useState<Map<string, { shapeId: string | null; headsign: string | null }>>(
+    new Map(),
+  );
+  useEffect(() => {
+    const tripIds = Array.from(new Set(filteredList.map((b) => b.tripId)));
+    const missing = tripIds.filter((id) => !tripDirections.has(id));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      missing.map(async (tripId) => {
+        const [shapeId, headsign] = await Promise.all([getShapeIdForTrip(tripId), getHeadsignForTrip(tripId)]);
+        return [tripId, { shapeId, headsign }] as const;
+      }),
+    ).then((resolved) => {
+      if (cancelled) return;
+      setTripDirections((prev) => {
+        const next = new Map(prev);
+        for (const [tripId, info] of resolved) next.set(tripId, info);
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [filteredList, tripDirections]);
+
+  // Foldout state (2026-09-09, Ross's ask: "a foldout rather than auto
+  // displayed... showing Route 5 (6 busses)") - collapsed by default,
+  // toggled per route.
+  const [expandedRoutes, setExpandedRoutes] = useState<Set<string>>(new Set());
+  // Collapse everything again on switching between Bus/Rail/away - avoids a
+  // stale "Route 5 expanded" carrying over if the other tab also happens to
+  // have a route with the same id.
+  useEffect(() => setExpandedRoutes(new Set()), [filterType]);
+  function toggleRouteExpanded(routeId: string) {
+    setExpandedRoutes((prev) => {
+      const next = new Set(prev);
+      if (next.has(routeId)) next.delete(routeId);
+      else next.add(routeId);
+      return next;
+    });
+  }
+
   const filteredByRoute = useMemo(() => {
     const byRoute = new Map<string, BusPosition[]>();
     for (const b of filteredList) {
@@ -1331,9 +1384,30 @@ export function CesiumView() {
       else byRoute.set(b.routeId, [b]);
     }
     return Array.from(byRoute.entries())
-      .map(([routeId, vehicles]) => ({ routeId, vehicles }))
+      .map(([routeId, vehicles]) => {
+        // Group by shapeId (falls back to the vehicle's own id when nothing
+        // has resolved yet, so it still renders as its own singleton group
+        // rather than vanishing until the lookup above finishes).
+        const byDirection = new Map<string, { label: string; vehicles: BusPosition[] }>();
+        for (const b of vehicles) {
+          const info = tripDirections.get(b.tripId);
+          const key = info?.shapeId ?? `unresolved:${b.id}`;
+          const existing = byDirection.get(key);
+          if (existing) existing.vehicles.push(b);
+          else byDirection.set(key, { label: info?.headsign ?? '', vehicles: [b] });
+        }
+        const directions = Array.from(byDirection.values()).sort((a, b) => b.vehicles.length - a.vehicles.length);
+        // Only bother numbering fallback labels ("Direction 1"/"Direction
+        // 2") when there's actually more than one direction to distinguish -
+        // a route with a single group just doesn't need a direction label
+        // at all.
+        directions.forEach((d, i) => {
+          if (!d.label) d.label = directions.length > 1 ? `Direction ${i + 1}` : '';
+        });
+        return { routeId, vehicles, directions };
+      })
       .sort((a, b) => b.vehicles.length - a.vehicles.length);
-  }, [filteredList]);
+  }, [filteredList, tripDirections]);
 
   // #11 "next vehicle near me", v2 (2026-09-05): nearest STOP(s), not nearest
   // live vehicle. Both sides of the street are separate stop_ids a few
@@ -2811,38 +2885,58 @@ export function CesiumView() {
           {filteredByRoute.length === 0 ? (
             <div className="px-3 py-2 text-white/40">No vehicles right now</div>
           ) : (
-            filteredByRoute.map(({ routeId, vehicles }) => (
-              <div key={routeId}>
-                <div className="px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85 flex items-baseline justify-between">
-                  <span>Route {routeId}</span>
-                  <span className="text-xs text-white/40 font-normal">
-                    {vehicles.length} vehicle{vehicles.length === 1 ? '' : 's'}
-                  </span>
-                </div>
-                {vehicles.map((b) => (
+            filteredByRoute.map(({ routeId, vehicles, directions }) => {
+              const expanded = expandedRoutes.has(routeId);
+              return (
+                <div key={routeId}>
+                  {/* Foldout header (2026-09-09, Ross's ask: "a foldout
+                      rather than auto displayed... showing Route 5 (6
+                      busses)") - collapsed by default, click to expand. */}
                   <button
-                    key={b.id}
-                    onClick={() => {
-                      setSelectedId(b.id);
-                      const entity = entitiesRef.current.get(b.id);
-                      const viewer = viewerRef.current;
-                      if (entity && viewer) void viewer.flyTo(entity);
-                    }}
-                    className="w-full flex items-center justify-between px-3 py-1.5 pl-5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
+                    onClick={() => toggleRouteExpanded(routeId)}
+                    className="w-full px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85 flex items-center justify-between text-left hover:bg-white/10"
                   >
-                    <span className="font-medium">{b.id}</span>
-                    {/* Live GTFS-RT status, not a scheduled departure time -
-                        no per-trip schedule lookup exists for this list yet
-                        (would need one getStopsForTrip() call per vehicle
-                        per poll - a real cost worth avoiding unless this
-                        turns out to actually be wanted). */}
-                    <span className="text-white/40 text-xs">
-                      {b.status === 'STOPPED_AT' ? 'At stop' : b.status === 'IN_TRANSIT_TO' ? 'In transit' : b.status}
+                    <span className="flex items-center gap-1.5">
+                      <span className={`inline-block transition-transform ${expanded ? 'rotate-90' : ''}`}>▸</span>
+                      Route {routeId} ({vehicles.length})
                     </span>
                   </button>
-                ))}
-              </div>
-            ))
+                  {expanded &&
+                    directions.map((dir, i) => (
+                      <div key={i}>
+                        {dir.label && (
+                          <div className="px-3 py-1 pl-6 text-[11px] uppercase tracking-wide text-white/40">
+                            {dir.label}
+                          </div>
+                        )}
+                        {dir.vehicles.map((b) => (
+                          <button
+                            key={b.id}
+                            onClick={() => {
+                              setSelectedId(b.id);
+                              const entity = entitiesRef.current.get(b.id);
+                              const viewer = viewerRef.current;
+                              if (entity && viewer) void viewer.flyTo(entity);
+                            }}
+                            className="w-full flex items-center justify-between px-3 py-1.5 pl-8 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
+                          >
+                            <span className="font-medium">{b.id}</span>
+                            {/* Live GTFS-RT status, not a scheduled
+                                departure time - no per-trip schedule lookup
+                                exists for this list yet (would need one
+                                getStopsForTrip() call per vehicle per poll -
+                                a real cost worth avoiding unless this turns
+                                out to actually be wanted). */}
+                            <span className="text-white/40 text-xs">
+                              {b.status === 'STOPPED_AT' ? 'At stop' : b.status === 'IN_TRANSIT_TO' ? 'In transit' : b.status}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                </div>
+              );
+            })
           )}
         </div>
       )}
