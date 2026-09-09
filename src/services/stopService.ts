@@ -106,6 +106,24 @@ export async function getAllStopCoordinates(): Promise<{ lat: number; lon: numbe
 }
 
 /**
+ * Every route_id in the static schedule, whether or not it has a live
+ * vehicle right now (2026-09-09, Ross's ask: "routes split to active and
+ * non active, still shown but greyed out"). `arrivals` is keyed
+ * stop_id -> route_id -> service_id -> times, so every route_id that ever
+ * appears as a second-level key is a route that exists in today's GTFS,
+ * independent of whether the live feed currently has a vehicle on it.
+ */
+export async function getAllRouteIds(): Promise<string[]> {
+  const snap = await loadSnapshot();
+  if (!snap) return [];
+  const routes = new Set<string>();
+  for (const byRoute of Object.values(snap.arrivals)) {
+    for (const routeId of Object.keys(byRoute)) routes.add(routeId);
+  }
+  return Array.from(routes).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+/**
  * Nearest stop's name to an arbitrary (lat, lon) - a human-readable "where is
  * this" for a vehicle's current position or a route's origin, e.g. "Dickson
  * Interchange". Pure geometry, no service-day filtering (unlike

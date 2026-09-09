@@ -54,6 +54,7 @@ import {
 import {
   computePunctuality,
   formatArrivalClock,
+  getAllRouteIds,
   getAllStopCoordinates,
   getNearestStopName,
   getNearestStops,
@@ -473,6 +474,27 @@ export function CesiumView() {
   const [linkStats, setLinkStats] = useState<Map<number, TrafficLinkLiveStats>>(new Map());
   const [congestionLoading, setCongestionLoading] = useState(false);
   const congestionEntitiesRef = useRef<Entity[]>([]);
+  // Every route_id that exists in the static schedule, live or not
+  // (2026-09-09, Ross's ask: "routes split to active and non active, still
+  // shown but greyed out") - see allRouteRows below for where this is
+  // merged with live counts. Fetched at startup, same as
+  // population/traffic above, even though stop-arrivals.json is the
+  // biggest of the three static snapshots (~1.5MB gzipped) - it's already
+  // needed for Near Me, and the permanent "Active routes" counter now
+  // wants the full picture from the first poll too, not just once Near Me
+  // or Routes has been opened.
+  const [allStaticRouteIds, setAllStaticRouteIds] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void preloadStopArrivals()
+      .then(() => getAllRouteIds())
+      .then((ids) => {
+        if (!cancelled) setAllStaticRouteIds(ids);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Boost applied to each cell's relative intensity before colouring - see
   // the rendering effect below. 1 = linear; higher values pull mid/low
   // values UP toward the hot end (any cell with real traffic, however
@@ -570,7 +592,21 @@ export function CesiumView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
-  const ROUTE_LIST_SIZE = 10;
+
+  // Full route list, live counts merged in (2026-09-09, Ross's ask: "routes
+  // split to active and non active, still shown but greyed out") - routeCounts
+  // above only ever knew about routes with a vehicle on them right now; this
+  // adds every route that exists in the static schedule at all, with count 0
+  // for ones with nothing live. Kept separate from routeCounts rather than
+  // changing it in place - the "Active routes" counter and "busiest route"
+  // references elsewhere genuinely mean "has a live vehicle", not "exists".
+  const allRouteRows = useMemo(() => {
+    const counts = new Map(routeCounts.map((r) => [r.routeId, r.count]));
+    const ids = new Set([...allStaticRouteIds, ...counts.keys()]);
+    return Array.from(ids)
+      .map((routeId) => ({ routeId, count: counts.get(routeId) ?? 0 }))
+      .sort((a, b) => b.count - a.count || a.routeId.localeCompare(b.routeId, undefined, { numeric: true }));
+  }, [allStaticRouteIds, routeCounts]);
 
   // #3 bus bunching (2026-09-05): two vehicles on the exact same shape (same
   // route, same direction) closer together along the route than they'd
@@ -1280,6 +1316,24 @@ export function CesiumView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [filterType, pollTick]);
+
+  // Route-first grouping for the Bus/Rail tab (2026-09-09, Ross's ask:
+  // "make the route the first col, and have the bus ID's captured nested
+  // under the route") - was a flat list sorted by vehicle ID with route as
+  // a secondary, right-aligned detail. Route order is by count (busiest
+  // route first) since that's usually more useful to scan than alphabetical;
+  // vehicle IDs within a route stay alphabetical.
+  const filteredByRoute = useMemo(() => {
+    const byRoute = new Map<string, BusPosition[]>();
+    for (const b of filteredList) {
+      const group = byRoute.get(b.routeId);
+      if (group) group.push(b);
+      else byRoute.set(b.routeId, [b]);
+    }
+    return Array.from(byRoute.entries())
+      .map(([routeId, vehicles]) => ({ routeId, vehicles }))
+      .sort((a, b) => b.vehicles.length - a.vehicles.length);
+  }, [filteredList]);
 
   // #11 "next vehicle near me", v2 (2026-09-05): nearest STOP(s), not nearest
   // live vehicle. Both sides of the street are separate stop_ids a few
@@ -2128,7 +2182,7 @@ export function CesiumView() {
           icon="🔥"
           label="Heat coverage"
           value={heatHeadline ? `${heatHeadline.coveragePct}%` : '—'}
-          sub={heatHeadline ? `${heatHeadline.activeCells}/${heatHeadline.totalCells} cells` : 'no data yet'}
+          sub={heatHeadline ? `${heatHeadline.activeCells}/${heatHeadline.totalCells} zones` : 'no data yet'}
           active={activeTab() === 'heatmap'}
           onClick={() => selectTab('heatmap')}
         />
@@ -2215,7 +2269,7 @@ export function CesiumView() {
             }`}
           >
             <span aria-hidden>🏘️</span>
-            {equityLoading ? 'Loading…' : 'Equity'}
+            {equityLoading ? 'Loading…' : 'Availability'}
           </button>
           <button
             onClick={() => selectTab('congestion')}
@@ -2313,12 +2367,12 @@ export function CesiumView() {
               <div className="flex items-baseline justify-between">
                 <span className="font-display text-lg font-semibold text-white">
                   {heatHeadline.activeCells}
-                  <span className="text-xs text-white/40 font-normal"> / {heatHeadline.totalCells} cells active</span>
+                  <span className="text-xs text-white/40 font-normal"> / {heatHeadline.totalCells} zones active</span>
                 </span>
                 <span className="text-xs text-white/40">{heatHeadline.coveragePct}% coverage</span>
               </div>
               <div className="flex items-baseline justify-between mt-1">
-                <span className="text-xs text-white/40">peak cell: {heatHeadline.busiest} updates</span>
+                <span className="text-xs text-white/40">peak zone: {heatHeadline.busiest} updates</span>
                 <span className="text-xs text-white/40">{heatHeadline.totalPings.toLocaleString()} updates (24h)</span>
               </div>
             </div>
@@ -2368,7 +2422,7 @@ export function CesiumView() {
       {showEquity && (
         <div className="text-xs px-3 py-2 flex flex-col gap-2 border-b border-white/10">
           <div className="text-white/60 font-medium">
-            2021 Census population vs. observed service (last 24h)
+            Service availability vs. 2021 Census population (last 24h)
           </div>
           <div className="flex items-center gap-2">
             <span className="text-white/50 shrink-0">Per SA1 area, relative to the rest of the ACT:</span>
@@ -2395,7 +2449,7 @@ export function CesiumView() {
         <div className="text-xs">
           {equityHeadline && (
             <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
-              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Network equity</div>
+              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Service availability</div>
               <div className="flex items-baseline justify-between">
                 <span className="font-display text-lg font-semibold text-red-600">{equityHeadline.underservedCount}</span>
                 <span className="text-xs text-white/40">of {equityHeadline.totalAreas} SA1 areas underserved</span>
@@ -2754,23 +2808,40 @@ export function CesiumView() {
       )}
       {!nearMeActive && filterType !== 'all' && (
         <div className="text-sm">
-          {filteredList.length === 0 ? (
+          {filteredByRoute.length === 0 ? (
             <div className="px-3 py-2 text-white/40">No vehicles right now</div>
           ) : (
-            filteredList.map((b) => (
-              <button
-                key={b.id}
-                onClick={() => {
-                  setSelectedId(b.id);
-                  const entity = entitiesRef.current.get(b.id);
-                  const viewer = viewerRef.current;
-                  if (entity && viewer) void viewer.flyTo(entity);
-                }}
-                className="w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
-              >
-                <span className="font-medium">{b.id}</span>
-                <span className="text-white/40 text-xs">route {b.routeId}</span>
-              </button>
+            filteredByRoute.map(({ routeId, vehicles }) => (
+              <div key={routeId}>
+                <div className="px-3 py-1.5 border-b border-white/10 font-display font-medium text-white/60 sticky top-0 bg-slate-950/85 flex items-baseline justify-between">
+                  <span>Route {routeId}</span>
+                  <span className="text-xs text-white/40 font-normal">
+                    {vehicles.length} vehicle{vehicles.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+                {vehicles.map((b) => (
+                  <button
+                    key={b.id}
+                    onClick={() => {
+                      setSelectedId(b.id);
+                      const entity = entitiesRef.current.get(b.id);
+                      const viewer = viewerRef.current;
+                      if (entity && viewer) void viewer.flyTo(entity);
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-1.5 pl-5 text-left hover:bg-white/10 border-b border-white/10 last:border-0"
+                  >
+                    <span className="font-medium">{b.id}</span>
+                    {/* Live GTFS-RT status, not a scheduled departure time -
+                        no per-trip schedule lookup exists for this list yet
+                        (would need one getStopsForTrip() call per vehicle
+                        per poll - a real cost worth avoiding unless this
+                        turns out to actually be wanted). */}
+                    <span className="text-white/40 text-xs">
+                      {b.status === 'STOPPED_AT' ? 'At stop' : b.status === 'IN_TRANSIT_TO' ? 'In transit' : b.status}
+                    </span>
+                  </button>
+                ))}
+              </div>
             ))
           )}
         </div>
@@ -2830,17 +2901,27 @@ export function CesiumView() {
               </span>
             </div>
           </div>
-          <div className="px-3 py-1.5 border-b border-white/10 font-medium text-white/60">Busiest routes</div>
-          {routeCounts.slice(0, ROUTE_LIST_SIZE).map((r) => (
+          {/* All routes, busiest first, inactive ones greyed out rather than
+              hidden (2026-09-09, Ross's ask: "routes split to active and non
+              active, still shown but greyed out") - allRouteRows merges the
+              full static schedule's route list with live counts (0 for a
+              route with nothing running right now). Still clickable even
+              at 0 - the map will just show nothing for it currently. */}
+          <div className="px-3 py-1.5 border-b border-white/10 font-medium text-white/60">
+            All routes ({allRouteRows.filter((r) => r.count > 0).length} active of {allRouteRows.length})
+          </div>
+          {allRouteRows.map((r) => (
             <button
               key={r.routeId}
               onClick={() => setRouteFilter(r.routeId)}
               className={`w-full flex items-center justify-between px-3 py-1.5 text-left hover:bg-white/10 border-b border-white/10 last:border-0 ${
                 routeFilter === r.routeId ? 'bg-white/10' : ''
-              }`}
+              } ${r.count === 0 ? 'opacity-40' : ''}`}
             >
               <span className="font-medium text-white/80">Route {r.routeId}</span>
-              <span className="text-white/40 shrink-0">{r.count} vehicles</span>
+              <span className="text-white/40 shrink-0">
+                {r.count > 0 ? `${r.count} vehicles` : 'inactive'}
+              </span>
             </button>
           ))}
         </div>
