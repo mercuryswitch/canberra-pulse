@@ -76,6 +76,7 @@ import {
   type TrafficLink,
   type TrafficLinkLiveStats,
 } from '@/services/trafficService';
+import { fetchHourlyTrends, type HourlyTrendPoint } from '@/services/trendService';
 
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
 // Google Photorealistic 3D Tiles. Without it we fall back to keyless
@@ -504,6 +505,38 @@ export function CesiumView() {
       cancelled = true;
     };
   }, []);
+  // Historic trends (2026-09-11) - the "second act" once the two-week
+  // capture (ACTBusEventLoader/ACTStopIdLoader/ACTTrafficLoader now on a
+  // 5-minute Fabric schedule - see PROJECT_STATUS.md) actually has multi-day
+  // history to show. Deliberately NOT polled continuously like the live
+  // counters above - this is a "look back over the capture so far" view,
+  // fetched on open and on manual refresh, not every 8s forever.
+  const [showTrends, setShowTrends] = useState(false);
+  const [trendData, setTrendData] = useState<HourlyTrendPoint[]>([]);
+  const [trendLoading, setTrendLoading] = useState(false);
+  const [trendError, setTrendError] = useState<string | null>(null);
+  const [trendRefreshTick, setTrendRefreshTick] = useState(0);
+  useEffect(() => {
+    if (!showTrends) return;
+    let cancelled = false;
+    setTrendLoading(true);
+    setTrendError(null);
+    const controller = new AbortController();
+    void fetchHourlyTrends(controller.signal)
+      .then((points) => {
+        if (!cancelled) setTrendData(points);
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setTrendError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setTrendLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [showTrends, trendRefreshTick]);
   // Boost applied to each cell's relative intensity before colouring - see
   // the rendering effect below. 1 = linear; higher values pull mid/low
   // values UP toward the hot end (any cell with real traffic, however
@@ -2016,6 +2049,38 @@ export function CesiumView() {
     const end = polarPoint(cx, cy, r, gaugeAngleDeg(toMinutes));
     return `M ${start.x} ${start.y} A ${r} ${r} 0 0 1 ${end.x} ${end.y}`;
   }
+  // Historic trend sparkline (2026-09-11) - same hand-rolled SVG approach as
+  // the on-time trend chart above, generalised for reuse across the three
+  // trend series (delay/congestion/activity have different value ranges and
+  // some hours have no reading at all - nulls just leave a gap, not a
+  // misleading zero). width/height match the viewBox they're drawn into.
+  function sparklinePoints(
+    values: (number | null)[],
+    width: number,
+    height: number,
+    padding = 4,
+  ): { x: number; y: number }[][] {
+    const real = values.filter((v): v is number => v !== null);
+    if (real.length === 0) return [];
+    const min = Math.min(...real);
+    const max = Math.max(...real);
+    const range = max - min || 1;
+    const usableH = height - padding * 2;
+    const segments: { x: number; y: number }[][] = [];
+    let current: { x: number; y: number }[] = [];
+    values.forEach((v, i) => {
+      const x = values.length > 1 ? (i / (values.length - 1)) * width : width / 2;
+      if (v === null) {
+        if (current.length > 0) segments.push(current);
+        current = [];
+        return;
+      }
+      const y = padding + usableH - ((v - min) / range) * usableH;
+      current.push({ x, y });
+    });
+    if (current.length > 0) segments.push(current);
+    return segments;
+  }
   // Fixed-width bins rather than one bar per whole-minute value - readable
   // as a small chart, and matches the same early/on-time/late color coding
   // used everywhere else in this panel (Punctuality label, on-time rows).
@@ -2091,7 +2156,7 @@ export function CesiumView() {
   // determine which tab is showing (that's exactly how every button already
   // decided its own active/inactive styling), so a second source of truth
   // would only risk drifting out of sync with them.
-  type TabId = 'bus' | 'rail' | 'nearme' | 'routes' | 'bunching' | 'heatmap' | 'ontime' | 'equity' | 'congestion';
+  type TabId = 'bus' | 'rail' | 'nearme' | 'routes' | 'bunching' | 'heatmap' | 'ontime' | 'equity' | 'congestion' | 'trends';
   function activeTab(): TabId | null {
     if (filterType === 'bus') return 'bus';
     if (filterType === 'rail') return 'rail';
@@ -2102,6 +2167,7 @@ export function CesiumView() {
     if (showOnTime) return 'ontime';
     if (showEquity) return 'equity';
     if (showCongestion) return 'congestion';
+    if (showTrends) return 'trends';
     return null;
   }
   // tab === null clears every filter/tab, matching the top counter's
@@ -2138,6 +2204,9 @@ export function CesiumView() {
         case 'congestion':
           setShowCongestion(false);
           return;
+        case 'trends':
+          setShowTrends(false);
+          return;
       }
     }
     // Reset every other tab, then activate the requested one (or nothing,
@@ -2151,6 +2220,7 @@ export function CesiumView() {
     setShowOnTime(false);
     setShowEquity(false);
     setShowCongestion(false);
+    setShowTrends(false);
     switch (tab) {
       case 'bus':
         setFilterType('bus');
@@ -2178,6 +2248,9 @@ export function CesiumView() {
         break;
       case 'congestion':
         setShowCongestion(true);
+        break;
+      case 'trends':
+        setShowTrends(true);
         break;
     }
   }
@@ -2380,6 +2453,15 @@ export function CesiumView() {
           >
             <span aria-hidden>🚦</span>
             {congestionLoading ? 'Loading…' : 'Congestion'}
+          </button>
+          <button
+            onClick={() => selectTab('trends')}
+            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
+              activeTab() === 'trends' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
+            }`}
+          >
+            <span aria-hidden>📈</span>
+            Trends
           </button>
         </nav>
 
@@ -2709,6 +2791,109 @@ export function CesiumView() {
               </button>
             ))}
           </div>
+        </div>
+      )}
+      {/* Historic trends (2026-09-11) - the "second act" Ross planned during
+          the capture-setup ideation session: live app is the demo anchor,
+          this is what shows once the two-week capture actually has
+          multi-day history. Deliberately not live-polled - fetched on open
+          and on manual refresh, since scrubbing back over the whole
+          capture window is the point, not a moment-to-moment view. */}
+      {showTrends && (
+        <div className="text-xs px-3 py-3 flex flex-col gap-4">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Historic trends</div>
+              <div className="text-white/40 mt-0.5">
+                {trendData.length > 0
+                  ? `${trendData.length}h captured, from ${new Date(trendData[0].hourMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric' })}`
+                  : trendLoading
+                    ? 'Loading…'
+                    : 'No data yet'}
+              </div>
+            </div>
+            <button
+              onClick={() => setTrendRefreshTick((t) => t + 1)}
+              disabled={trendLoading}
+              className="shrink-0 text-white/50 hover:text-white/90 disabled:opacity-40 transition-colors"
+              title="Refresh"
+              aria-label="Refresh trends"
+            >
+              ⟳
+            </button>
+          </div>
+          {trendError && (
+            <div className="text-red-400">Couldn't load trends: {trendError}</div>
+          )}
+          {!trendLoading && !trendError && trendData.length === 0 && (
+            <div className="text-white/40">
+              The historic capture just started - come back once a few hours (or days) have
+              accumulated. See PROJECT_STATUS.md for the capture schedule.
+            </div>
+          )}
+          {trendData.length > 0 && (
+            <>
+              <div>
+                <div className="font-display text-white/50 font-medium mb-1">Network median delay, hourly</div>
+                <svg viewBox="0 0 260 60" className="w-full">
+                  <line x1={0} y1={30} x2={260} y2={30} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
+                  {sparklinePoints(
+                    trendData.map((p) => p.avgDelayMinutes),
+                    260,
+                    60,
+                  ).map((seg, i) => (
+                    <polyline
+                      key={i}
+                      fill="none"
+                      stroke="#f1f5f9"
+                      strokeWidth={2}
+                      points={seg.map((p) => `${p.x},${p.y}`).join(' ')}
+                    />
+                  ))}
+                </svg>
+              </div>
+              <div>
+                <div className="font-display text-white/50 font-medium mb-1">Congestion, hourly avg score</div>
+                <svg viewBox="0 0 260 60" className="w-full">
+                  {sparklinePoints(
+                    trendData.map((p) => p.avgCongestionScore),
+                    260,
+                    60,
+                  ).map((seg, i) => (
+                    <polyline
+                      key={i}
+                      fill="none"
+                      stroke="#f97316"
+                      strokeWidth={2}
+                      points={seg.map((p) => `${p.x},${p.y}`).join(' ')}
+                    />
+                  ))}
+                </svg>
+              </div>
+              <div>
+                <div className="font-display text-white/50 font-medium mb-1">Active vehicles, hourly</div>
+                <svg viewBox="0 0 260 60" className="w-full">
+                  {sparklinePoints(
+                    trendData.map((p) => p.activeVehicles),
+                    260,
+                    60,
+                  ).map((seg, i) => (
+                    <polyline
+                      key={i}
+                      fill="none"
+                      stroke="#38bdf8"
+                      strokeWidth={2}
+                      points={seg.map((p) => `${p.x},${p.y}`).join(' ')}
+                    />
+                  ))}
+                </svg>
+              </div>
+              <div className="text-white/40 pt-1 border-t border-white/10">
+                Server-side hourly aggregates straight from Kusto - scales fine regardless of how
+                much raw data the two-week capture accumulates underneath.
+              </div>
+            </>
+          )}
         </div>
       )}
       {/* "Near me for this bus" (2026-09-08): selecting a vehicle while Near
