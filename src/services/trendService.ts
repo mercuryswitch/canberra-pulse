@@ -25,8 +25,17 @@ export interface HourlyTrendPoint {
   activeVehicles: number;
 }
 
+// A handful of rows (confirmed directly against live data: ~66 out of ~70K,
+// both buses and light rail, clustered right at the midnight AEST boundary
+// each night) carry delay_minutes around -1440 - a day-rollover defect
+// upstream, not a real 24h-late arrival. Rare, but an hourly bucket with few
+// samples can be dominated by just one or two of these, dragging that
+// hour's avg to -1439-ish and blowing out the whole sparkline's scale (this
+// is a wrong-but-finite number, so finiteOrNull()'s NaN guard doesn't catch
+// it). No real ACT service is ever ~2h+ late, so that's a safe cutoff.
 const ONTIME_TREND_KQL = `
 BusStopObservations
+| where abs(delay_minutes) < 120
 | summarize avgDelay = avg(delay_minutes), n = count() by bin(ts, 1h)
 | order by ts asc
 `;
