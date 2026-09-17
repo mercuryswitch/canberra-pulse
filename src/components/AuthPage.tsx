@@ -51,9 +51,9 @@ export function AuthPage() {
         <div className="w-full max-w-sm">
           <div className="rounded-3xl border border-white/60 bg-white/80 p-8 shadow-xl backdrop-blur-sm">
             <div className="mb-8 text-center">
-              <h1 className="text-2xl font-bold text-gray-900">Blank App</h1>
+              <h1 className="text-2xl font-bold text-gray-900">Canberra Pulse</h1>
               <p className="mt-2 text-sm text-gray-500">
-                Sign in to get started.
+                Sign in to view live transit data.
               </p>
             </div>
 
