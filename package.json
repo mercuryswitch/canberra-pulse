@@ -1,17 +1,14 @@
 {
   "name": "canberra-pulse",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Real-time transit digital twin for Canberra's bus and light rail network, built on Microsoft Fabric.",
   "type": "module",
-  "template": {
-    "name": "blankapp",
-    "displayName": "Blank App",
-    "description": "Bare-bones Fabric-authenticated React + Vite app — sign-in, routing, and a placeholder home page, with no data layer to remove"
-  },
   "scripts": {
     "predev": "rayfin env --framework vite",
     "prebuild": "rayfin env --framework vite",
     "dev": "rayfin up --exclude-services staticHosting && vite",
+    "dev:local": "vite",
     "build": "tsc -b && vite build",
     "build:fabric": "tsc -b && vite build",
     "lint": "eslint .",
