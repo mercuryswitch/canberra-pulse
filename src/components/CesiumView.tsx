@@ -76,7 +76,17 @@ import {
   type TrafficLink,
   type TrafficLinkLiveStats,
 } from '@/services/trafficService';
-import { fetchHourlyTrends, type HourlyTrendPoint } from '@/services/trendService';
+import {
+  fetchCongestionLeaderboard,
+  fetchHourlyTrends,
+  fetchModeComparison,
+  fetchRouteLeaderboard,
+  type CongestionLeaderboardEntry,
+  type HourlyTrendPoint,
+  type ModeComparison,
+  type RouteLeaderboard,
+  type TrendScope,
+} from '@/services/trendService';
 
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
 // Google Photorealistic 3D Tiles. Without it we fall back to keyless
@@ -516,15 +526,34 @@ export function CesiumView() {
   const [trendLoading, setTrendLoading] = useState(false);
   const [trendError, setTrendError] = useState<string | null>(null);
   const [trendRefreshTick, setTrendRefreshTick] = useState(0);
+  // Weekday/weekend filter (2026-09-16 ideation session) applied across
+  // every trend query below, not just the sparklines - a real, confirmed
+  // difference (roughly double the weekday daytime service frequency, and a
+  // visible AM/PM commute peak in road delay that's absent on weekends), so
+  // one shared toggle for the whole panel tells a more consistent story
+  // than filtering only one chart.
+  const [trendScope, setTrendScope] = useState<TrendScope>('all');
+  const [modeComparison, setModeComparison] = useState<ModeComparison>({ bus: null, rail: null });
+  const [congestionLeaderboard, setCongestionLeaderboard] = useState<CongestionLeaderboardEntry[]>([]);
+  const [routeLeaderboard, setRouteLeaderboard] = useState<RouteLeaderboard>({ best: [], worst: [] });
   useEffect(() => {
     if (!showTrends) return;
     let cancelled = false;
     setTrendLoading(true);
     setTrendError(null);
     const controller = new AbortController();
-    void fetchHourlyTrends(controller.signal)
-      .then((points) => {
-        if (!cancelled) setTrendData(points);
+    void Promise.all([
+      fetchHourlyTrends(trendScope, controller.signal),
+      fetchModeComparison(trendScope, controller.signal),
+      fetchCongestionLeaderboard(trendScope, 5, controller.signal),
+      fetchRouteLeaderboard(trendScope, controller.signal),
+    ])
+      .then(([hourly, mode, congestion, routes]) => {
+        if (cancelled) return;
+        setTrendData(hourly);
+        setModeComparison(mode);
+        setCongestionLeaderboard(congestion);
+        setRouteLeaderboard(routes);
       })
       .catch((err: Error) => {
         if (!cancelled) setTrendError(err.message);
@@ -536,7 +565,7 @@ export function CesiumView() {
       cancelled = true;
       controller.abort();
     };
-  }, [showTrends, trendRefreshTick]);
+  }, [showTrends, trendRefreshTick, trendScope]);
   // Boost applied to each cell's relative intensity before colouring - see
   // the rendering effect below. 1 = linear; higher values pull mid/low
   // values UP toward the hot end (any cell with real traffic, however
@@ -2822,6 +2851,21 @@ export function CesiumView() {
               ⟳
             </button>
           </div>
+          <div className="flex gap-1">
+            {(['all', 'weekday', 'weekend'] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setTrendScope(s)}
+                className={`px-2 py-1 rounded-[5px] border text-[11px] transition-colors ${
+                  trendScope === s
+                    ? 'border-white/40 bg-white/10 text-white/90'
+                    : 'border-white/10 text-white/40 hover:text-white/70'
+                }`}
+              >
+                {s === 'all' ? 'All days' : s === 'weekday' ? 'Weekdays' : 'Weekends'}
+              </button>
+            ))}
+          </div>
           {trendError && (
             <div className="text-red-400">Couldn't load trends: {trendError}</div>
           )}
@@ -2833,6 +2877,85 @@ export function CesiumView() {
           )}
           {trendData.length > 0 && (
             <>
+              {(modeComparison.bus || modeComparison.rail) && (
+                <div>
+                  <div className="font-display text-white/50 font-medium mb-1">Bus vs light rail reliability</div>
+                  <div className="flex gap-2">
+                    {(['bus', 'rail'] as const).map((mode) => {
+                      const stats = modeComparison[mode];
+                      return (
+                        <div key={mode} className="flex-1 rounded-[5px] border border-white/10 px-2 py-1.5">
+                          <div className="text-white/40 text-[10px] uppercase tracking-wide">
+                            {mode === 'bus' ? 'Bus' : 'Light rail'}
+                          </div>
+                          {stats ? (
+                            <>
+                              <div
+                                className={`text-base font-medium leading-tight ${
+                                  stats.onTimePct >= 90
+                                    ? 'text-green-600'
+                                    : stats.onTimePct >= 70
+                                      ? 'text-white/90'
+                                      : 'text-red-600'
+                                }`}
+                              >
+                                {stats.onTimePct}%
+                              </div>
+                              <div className="text-white/40 text-[10px]">
+                                on time · {stats.samples.toLocaleString()} obs
+                              </div>
+                            </>
+                          ) : (
+                            <div className="text-white/30 text-[10px] mt-1">No data</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {(routeLeaderboard.best.length > 0 || routeLeaderboard.worst.length > 0) && (
+                <div>
+                  <div className="font-display text-white/50 font-medium mb-1">
+                    Route on-time leaderboard <span className="text-white/30 normal-case">(busiest routes only)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-green-600 text-[10px] uppercase tracking-wide mb-0.5">Best</div>
+                      {routeLeaderboard.best.map((r) => (
+                        <div key={r.routeId} className="flex items-center justify-between">
+                          <span className="text-white/70 truncate">Route {r.routeId}</span>
+                          <span className="text-green-600 shrink-0">{r.onTimePct}%</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div>
+                      <div className="text-red-600 text-[10px] uppercase tracking-wide mb-0.5">Worst</div>
+                      {routeLeaderboard.worst.map((r) => (
+                        <div key={r.routeId} className="flex items-center justify-between">
+                          <span className="text-white/70 truncate">Route {r.routeId}</span>
+                          <span className="text-red-600 shrink-0">{r.onTimePct}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {congestionLeaderboard.length > 0 && (
+                <div>
+                  <div className="font-display text-white/50 font-medium mb-1">Most congested roads</div>
+                  <div className="flex flex-col gap-1">
+                    {congestionLeaderboard.map((link, i) => (
+                      <div key={link.linkId} className="flex items-center justify-between gap-2">
+                        <span className="text-white/70 truncate">
+                          {i + 1}. {link.name}
+                        </span>
+                        <span className="text-orange-400 shrink-0">{Math.round(link.avgSpeedKmh)} km/h avg</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div>
                 <div className="font-display text-white/50 font-medium mb-1">Network median delay, hourly</div>
                 <svg viewBox="0 0 260 60" className="w-full">
