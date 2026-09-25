@@ -28,6 +28,7 @@ import {
 } from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 
 import {
   type BusPosition,
@@ -76,18 +77,6 @@ import {
   type TrafficLink,
   type TrafficLinkLiveStats,
 } from '@/services/trafficService';
-import {
-  fetchCongestionLeaderboard,
-  fetchHourlyTrends,
-  fetchModeComparison,
-  fetchRouteLeaderboard,
-  type CongestionLeaderboardEntry,
-  type HourlyTrendPoint,
-  type ModeComparison,
-  type RouteLeaderboard,
-  type TrendScope,
-} from '@/services/trendService';
-
 // Optional: a free Cesium Ion token (ion.cesium.com) unlocks world terrain and
 // Google Photorealistic 3D Tiles. Without it we fall back to keyless
 // OpenStreetMap imagery on a plain ellipsoid - fine for an MVP.
@@ -515,57 +504,6 @@ export function CesiumView() {
       cancelled = true;
     };
   }, []);
-  // Historic trends (2026-09-11) - the "second act" once the two-week
-  // capture (ACTBusEventLoader/ACTStopIdLoader/ACTTrafficLoader now on a
-  // 5-minute Fabric schedule - see PROJECT_STATUS.md) actually has multi-day
-  // history to show. Deliberately NOT polled continuously like the live
-  // counters above - this is a "look back over the capture so far" view,
-  // fetched on open and on manual refresh, not every 8s forever.
-  const [showTrends, setShowTrends] = useState(false);
-  const [trendData, setTrendData] = useState<HourlyTrendPoint[]>([]);
-  const [trendLoading, setTrendLoading] = useState(false);
-  const [trendError, setTrendError] = useState<string | null>(null);
-  const [trendRefreshTick, setTrendRefreshTick] = useState(0);
-  // Weekday/weekend filter (2026-09-16 ideation session) applied across
-  // every trend query below, not just the sparklines - a real, confirmed
-  // difference (roughly double the weekday daytime service frequency, and a
-  // visible AM/PM commute peak in road delay that's absent on weekends), so
-  // one shared toggle for the whole panel tells a more consistent story
-  // than filtering only one chart.
-  const [trendScope, setTrendScope] = useState<TrendScope>('all');
-  const [modeComparison, setModeComparison] = useState<ModeComparison>({ bus: null, rail: null });
-  const [congestionLeaderboard, setCongestionLeaderboard] = useState<CongestionLeaderboardEntry[]>([]);
-  const [routeLeaderboard, setRouteLeaderboard] = useState<RouteLeaderboard>({ best: [], worst: [] });
-  useEffect(() => {
-    if (!showTrends) return;
-    let cancelled = false;
-    setTrendLoading(true);
-    setTrendError(null);
-    const controller = new AbortController();
-    void Promise.all([
-      fetchHourlyTrends(trendScope, controller.signal),
-      fetchModeComparison(trendScope, controller.signal),
-      fetchCongestionLeaderboard(trendScope, 5, controller.signal),
-      fetchRouteLeaderboard(trendScope, controller.signal),
-    ])
-      .then(([hourly, mode, congestion, routes]) => {
-        if (cancelled) return;
-        setTrendData(hourly);
-        setModeComparison(mode);
-        setCongestionLeaderboard(congestion);
-        setRouteLeaderboard(routes);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) setTrendError(err.message);
-      })
-      .finally(() => {
-        if (!cancelled) setTrendLoading(false);
-      });
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [showTrends, trendRefreshTick, trendScope]);
   // Boost applied to each cell's relative intensity before colouring - see
   // the rendering effect below. 1 = linear; higher values pull mid/low
   // values UP toward the hot end (any cell with real traffic, however
@@ -2078,38 +2016,6 @@ export function CesiumView() {
     const end = polarPoint(cx, cy, r, gaugeAngleDeg(toMinutes));
     return `M ${start.x} ${start.y} A ${r} ${r} 0 0 1 ${end.x} ${end.y}`;
   }
-  // Historic trend sparkline (2026-09-11) - same hand-rolled SVG approach as
-  // the on-time trend chart above, generalised for reuse across the three
-  // trend series (delay/congestion/activity have different value ranges and
-  // some hours have no reading at all - nulls just leave a gap, not a
-  // misleading zero). width/height match the viewBox they're drawn into.
-  function sparklinePoints(
-    values: (number | null)[],
-    width: number,
-    height: number,
-    padding = 4,
-  ): { x: number; y: number }[][] {
-    const real = values.filter((v): v is number => v !== null);
-    if (real.length === 0) return [];
-    const min = Math.min(...real);
-    const max = Math.max(...real);
-    const range = max - min || 1;
-    const usableH = height - padding * 2;
-    const segments: { x: number; y: number }[][] = [];
-    let current: { x: number; y: number }[] = [];
-    values.forEach((v, i) => {
-      const x = values.length > 1 ? (i / (values.length - 1)) * width : width / 2;
-      if (v === null) {
-        if (current.length > 0) segments.push(current);
-        current = [];
-        return;
-      }
-      const y = padding + usableH - ((v - min) / range) * usableH;
-      current.push({ x, y });
-    });
-    if (current.length > 0) segments.push(current);
-    return segments;
-  }
   // Fixed-width bins rather than one bar per whole-minute value - readable
   // as a small chart, and matches the same early/on-time/late color coding
   // used everywhere else in this panel (Punctuality label, on-time rows).
@@ -2185,7 +2091,7 @@ export function CesiumView() {
   // determine which tab is showing (that's exactly how every button already
   // decided its own active/inactive styling), so a second source of truth
   // would only risk drifting out of sync with them.
-  type TabId = 'bus' | 'rail' | 'nearme' | 'routes' | 'bunching' | 'heatmap' | 'ontime' | 'equity' | 'congestion' | 'trends';
+  type TabId = 'bus' | 'rail' | 'nearme' | 'routes' | 'bunching' | 'heatmap' | 'ontime' | 'equity' | 'congestion';
   function activeTab(): TabId | null {
     if (filterType === 'bus') return 'bus';
     if (filterType === 'rail') return 'rail';
@@ -2196,7 +2102,6 @@ export function CesiumView() {
     if (showOnTime) return 'ontime';
     if (showEquity) return 'equity';
     if (showCongestion) return 'congestion';
-    if (showTrends) return 'trends';
     return null;
   }
   // tab === null clears every filter/tab, matching the top counter's
@@ -2233,9 +2138,6 @@ export function CesiumView() {
         case 'congestion':
           setShowCongestion(false);
           return;
-        case 'trends':
-          setShowTrends(false);
-          return;
       }
     }
     // Reset every other tab, then activate the requested one (or nothing,
@@ -2249,7 +2151,6 @@ export function CesiumView() {
     setShowOnTime(false);
     setShowEquity(false);
     setShowCongestion(false);
-    setShowTrends(false);
     switch (tab) {
       case 'bus':
         setFilterType('bus');
@@ -2277,9 +2178,6 @@ export function CesiumView() {
         break;
       case 'congestion':
         setShowCongestion(true);
-        break;
-      case 'trends':
-        setShowTrends(true);
         break;
     }
   }
@@ -2483,15 +2381,13 @@ export function CesiumView() {
             <span aria-hidden>🚦</span>
             {congestionLoading ? 'Loading…' : 'Congestion'}
           </button>
-          <button
-            onClick={() => selectTab('trends')}
-            className={`flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors ${
-              activeTab() === 'trends' ? 'bg-sky-500 text-white' : 'hover:bg-white/10'
-            }`}
+          <Link
+            to="/trends"
+            className="flex items-center gap-2 px-3 py-2 mx-2 rounded-md text-sm transition-colors hover:bg-white/10"
           >
             <span aria-hidden>📈</span>
             Trends
-          </button>
+          </Link>
         </nav>
 
         {/* Map pane (2026-09-09, Ross's ask: "make the map a pane within the
@@ -2820,203 +2716,6 @@ export function CesiumView() {
               </button>
             ))}
           </div>
-        </div>
-      )}
-      {/* Historic trends (2026-09-11) - the "second act" Ross planned during
-          the capture-setup ideation session: live app is the demo anchor,
-          this is what shows once the two-week capture actually has
-          multi-day history. Deliberately not live-polled - fetched on open
-          and on manual refresh, since scrubbing back over the whole
-          capture window is the point, not a moment-to-moment view. */}
-      {showTrends && (
-        <div className="text-xs px-3 py-3 flex flex-col gap-4">
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Historic trends</div>
-              <div className="text-white/40 mt-0.5">
-                {trendData.length > 0
-                  ? `${trendData.length}h captured, from ${new Date(trendData[0].hourMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric' })}`
-                  : trendLoading
-                    ? 'Loading…'
-                    : 'No data yet'}
-              </div>
-            </div>
-            <button
-              onClick={() => setTrendRefreshTick((t) => t + 1)}
-              disabled={trendLoading}
-              className="shrink-0 text-white/50 hover:text-white/90 disabled:opacity-40 transition-colors"
-              title="Refresh"
-              aria-label="Refresh trends"
-            >
-              ⟳
-            </button>
-          </div>
-          <div className="flex gap-1">
-            {(['all', 'weekday', 'weekend'] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => setTrendScope(s)}
-                className={`px-2 py-1 rounded-[5px] border text-[11px] transition-colors ${
-                  trendScope === s
-                    ? 'border-white/40 bg-white/10 text-white/90'
-                    : 'border-white/10 text-white/40 hover:text-white/70'
-                }`}
-              >
-                {s === 'all' ? 'All days' : s === 'weekday' ? 'Weekdays' : 'Weekends'}
-              </button>
-            ))}
-          </div>
-          {trendError && (
-            <div className="text-red-400">Couldn't load trends: {trendError}</div>
-          )}
-          {!trendLoading && !trendError && trendData.length === 0 && (
-            <div className="text-white/40">
-              The historic capture just started - come back once a few hours (or days) have
-              accumulated. See PROJECT_STATUS.md for the capture schedule.
-            </div>
-          )}
-          {trendData.length > 0 && (
-            <>
-              {(modeComparison.bus || modeComparison.rail) && (
-                <div>
-                  <div className="font-display text-white/50 font-medium mb-1">Bus vs light rail reliability</div>
-                  <div className="flex gap-2">
-                    {(['bus', 'rail'] as const).map((mode) => {
-                      const stats = modeComparison[mode];
-                      return (
-                        <div key={mode} className="flex-1 rounded-[5px] border border-white/10 px-2 py-1.5">
-                          <div className="text-white/40 text-[10px] uppercase tracking-wide">
-                            {mode === 'bus' ? 'Bus' : 'Light rail'}
-                          </div>
-                          {stats ? (
-                            <>
-                              <div
-                                className={`text-base font-medium leading-tight ${
-                                  stats.onTimePct >= 90
-                                    ? 'text-green-600'
-                                    : stats.onTimePct >= 70
-                                      ? 'text-white/90'
-                                      : 'text-red-600'
-                                }`}
-                              >
-                                {stats.onTimePct}%
-                              </div>
-                              <div className="text-white/40 text-[10px]">
-                                on time · {stats.samples.toLocaleString()} obs
-                              </div>
-                            </>
-                          ) : (
-                            <div className="text-white/30 text-[10px] mt-1">No data</div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              {(routeLeaderboard.best.length > 0 || routeLeaderboard.worst.length > 0) && (
-                <div>
-                  <div className="font-display text-white/50 font-medium mb-1">
-                    Route on-time leaderboard <span className="text-white/30 normal-case">(busiest routes only)</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <div className="text-green-600 text-[10px] uppercase tracking-wide mb-0.5">Best</div>
-                      {routeLeaderboard.best.map((r) => (
-                        <div key={r.routeId} className="flex items-center justify-between">
-                          <span className="text-white/70 truncate">Route {r.routeId}</span>
-                          <span className="text-green-600 shrink-0">{r.onTimePct}%</span>
-                        </div>
-                      ))}
-                    </div>
-                    <div>
-                      <div className="text-red-600 text-[10px] uppercase tracking-wide mb-0.5">Worst</div>
-                      {routeLeaderboard.worst.map((r) => (
-                        <div key={r.routeId} className="flex items-center justify-between">
-                          <span className="text-white/70 truncate">Route {r.routeId}</span>
-                          <span className="text-red-600 shrink-0">{r.onTimePct}%</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-              {congestionLeaderboard.length > 0 && (
-                <div>
-                  <div className="font-display text-white/50 font-medium mb-1">Most congested roads</div>
-                  <div className="flex flex-col gap-1">
-                    {congestionLeaderboard.map((link, i) => (
-                      <div key={link.linkId} className="flex items-center justify-between gap-2">
-                        <span className="text-white/70 truncate">
-                          {i + 1}. {link.name}
-                        </span>
-                        <span className="text-orange-400 shrink-0">{Math.round(link.avgSpeedKmh)} km/h avg</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div>
-                <div className="font-display text-white/50 font-medium mb-1">Network median delay, hourly</div>
-                <svg viewBox="0 0 260 60" className="w-full">
-                  <line x1={0} y1={30} x2={260} y2={30} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
-                  {sparklinePoints(
-                    trendData.map((p) => p.avgDelayMinutes),
-                    260,
-                    60,
-                  ).map((seg, i) => (
-                    <polyline
-                      key={i}
-                      fill="none"
-                      stroke="#f1f5f9"
-                      strokeWidth={2}
-                      points={seg.map((p) => `${p.x},${p.y}`).join(' ')}
-                    />
-                  ))}
-                </svg>
-              </div>
-              <div>
-                <div className="font-display text-white/50 font-medium mb-1">Congestion, hourly avg score</div>
-                <svg viewBox="0 0 260 60" className="w-full">
-                  {sparklinePoints(
-                    trendData.map((p) => p.avgCongestionScore),
-                    260,
-                    60,
-                  ).map((seg, i) => (
-                    <polyline
-                      key={i}
-                      fill="none"
-                      stroke="#f97316"
-                      strokeWidth={2}
-                      points={seg.map((p) => `${p.x},${p.y}`).join(' ')}
-                    />
-                  ))}
-                </svg>
-              </div>
-              <div>
-                <div className="font-display text-white/50 font-medium mb-1">Active vehicles, hourly</div>
-                <svg viewBox="0 0 260 60" className="w-full">
-                  {sparklinePoints(
-                    trendData.map((p) => p.activeVehicles),
-                    260,
-                    60,
-                  ).map((seg, i) => (
-                    <polyline
-                      key={i}
-                      fill="none"
-                      stroke="#38bdf8"
-                      strokeWidth={2}
-                      points={seg.map((p) => `${p.x},${p.y}`).join(' ')}
-                    />
-                  ))}
-                </svg>
-              </div>
-              <div className="text-white/40 pt-1 border-t border-white/10">
-                Server-side hourly aggregates straight from Kusto - scales fine regardless of how
-                much raw data the two-week capture accumulates underneath.
-              </div>
-            </>
-          )}
         </div>
       )}
       {/* "Near me for this bus" (2026-09-08): selecting a vehicle while Near

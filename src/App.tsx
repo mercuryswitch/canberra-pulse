@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthPage } from '@/components/AuthPage';
 import { useAuth } from '@/hooks/AuthContext';
 import { HomePage } from '@/pages/HomePage';
+import { TrendsPage } from '@/pages/TrendsPage';
 
 function AuthGuard({
   children,
@@ -45,6 +46,14 @@ function App() {
           element={
             <AuthGuard requireAuth={true}>
               <HomePage />
+            </AuthGuard>
+          }
+        />
+        <Route
+          path="/trends"
+          element={
+            <AuthGuard requireAuth={true}>
+              <TrendsPage />
             </AuthGuard>
           }
         />
