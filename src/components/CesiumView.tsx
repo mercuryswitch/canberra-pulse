@@ -28,7 +28,7 @@ import {
 } from 'cesium';
 import 'cesium/Build/Cesium/Widgets/widgets.css';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import {
   type BusPosition,
@@ -456,6 +456,29 @@ export function CesiumView() {
   // rule as everything else here.
   const [routeFilter, setRouteFilter] = useState<string | null>(null);
   const [showRoutesList, setShowRoutesList] = useState(false);
+  // Drill-down from the Trends page (2026-09-28, Ross's ask: "click a route
+  // on a chart, drill to that route on the map"). TrendsPage navigates here
+  // with ?route= or ?mode= rather than sharing React state directly - it's
+  // a different page, mounted fresh, so a URL param is the only channel
+  // that survives the navigation. Consumed once on mount, then stripped
+  // from the URL so it doesn't re-fire on a later re-render or back/forward.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const route = searchParams.get('route');
+    const mode = searchParams.get('mode');
+    const congestion = searchParams.get('congestion');
+    if (!route && !mode && !congestion) return;
+    if (route) {
+      setShowRoutesList(true);
+      setRouteFilter(route);
+    } else if (mode === 'bus' || mode === 'rail') {
+      setFilterType(mode);
+    } else if (congestion) {
+      setShowCongestion(true);
+    }
+    setSearchParams({}, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [showBunching, setShowBunching] = useState(false);
   // #1 service coverage heat map (2026-09-05): fetched once per toggle-open,
   // not on every poll - it's a 24h history aggregate, not a live view, so

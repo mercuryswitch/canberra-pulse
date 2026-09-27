@@ -11,7 +11,7 @@
  * problem, not a shortcut worth keeping.
  */
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Bar,
   BarChart,
@@ -137,6 +137,7 @@ const OBSERVATIONS: Observation[] = [
 ];
 
 export function TrendsPage() {
+  const navigate = useNavigate();
   const [scope, setScope] = useState<TrendScope>('all');
   const [tab, setTab] = useState<'trends' | 'observations'>('trends');
   const [hourly, setHourly] = useState<HourlyTrendPoint[]>([]);
@@ -180,16 +181,16 @@ export function TrendsPage() {
   const ticks = evenTicks(hourly);
 
   const modeChartData = [
-    { name: 'Bus', onTime: modeComparison.bus?.onTimePct ?? 0, samples: modeComparison.bus?.samples ?? 0 },
-    { name: 'Light rail', onTime: modeComparison.rail?.onTimePct ?? 0, samples: modeComparison.rail?.samples ?? 0 },
+    { name: 'Bus', mode: 'bus' as const, onTime: modeComparison.bus?.onTimePct ?? 0, samples: modeComparison.bus?.samples ?? 0 },
+    { name: 'Light rail', mode: 'rail' as const, onTime: modeComparison.rail?.onTimePct ?? 0, samples: modeComparison.rail?.samples ?? 0 },
   ];
 
   const routeChartData = [
-    ...routeLeaderboard.best.map((r) => ({ name: `Route ${r.routeId}`, onTime: r.onTimePct, group: 'best' as const })),
+    ...routeLeaderboard.best.map((r) => ({ name: `Route ${r.routeId}`, routeId: r.routeId, onTime: r.onTimePct, group: 'best' as const })),
     ...routeLeaderboard.worst
       .slice()
       .reverse()
-      .map((r) => ({ name: `Route ${r.routeId}`, onTime: r.onTimePct, group: 'worst' as const })),
+      .map((r) => ({ name: `Route ${r.routeId}`, routeId: r.routeId, onTime: r.onTimePct, group: 'worst' as const })),
   ];
 
   // Opacity scaled within this leaderboard's own min/max, not a fixed
@@ -269,7 +270,9 @@ export function TrendsPage() {
           <div className="flex flex-col gap-6">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
-                <div className="font-display text-sm font-semibold text-white/90 mb-3">Bus vs light rail reliability</div>
+                <div className="font-display text-sm font-semibold text-white/90 mb-3">
+                  Bus vs light rail reliability <span className="text-white/30 font-normal">(click a bar to view on map)</span>
+                </div>
                 <div className="h-56 w-full">
                   <ResponsiveContainer>
                     <BarChart data={modeChartData} layout="vertical" margin={{ left: 8, right: 24 }}>
@@ -286,7 +289,12 @@ export function TrendsPage() {
                         contentStyle={TOOLTIP_STYLE}
                         formatter={(v: number, _n, p) => [`${v}% on time (${p.payload.samples.toLocaleString()} obs)`, '']}
                       />
-                      <Bar dataKey="onTime" radius={[0, 6, 6, 0]}>
+                      <Bar
+                        dataKey="onTime"
+                        radius={[0, 6, 6, 0]}
+                        cursor="pointer"
+                        onClick={(data) => navigate(`/?mode=${data.payload.mode}`)}
+                      >
                         {modeChartData.map((d) => (
                           <Cell key={d.name} fill={d.name === 'Bus' ? '#f59e0b' : '#14b8a6'} />
                         ))}
@@ -298,7 +306,8 @@ export function TrendsPage() {
 
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
                 <div className="font-display text-sm font-semibold text-white/90 mb-3">
-                  Route on-time leaderboard <span className="text-white/30 font-normal">(busiest routes, n≥200)</span>
+                  Route on-time leaderboard{' '}
+                  <span className="text-white/30 font-normal">(busiest routes, n≥200 - click a bar to view on map)</span>
                 </div>
                 <div className="h-56 w-full">
                   <ResponsiveContainer>
@@ -307,7 +316,12 @@ export function TrendsPage() {
                       <XAxis type="number" domain={[0, 100]} tickFormatter={(v: number) => `${v}%`} stroke={AXIS_STROKE} tick={AXIS_TICK} />
                       <YAxis type="category" dataKey="name" width={80} stroke={AXIS_STROKE} tick={AXIS_TICK} />
                       <Tooltip contentStyle={TOOLTIP_STYLE} formatter={(v: number) => [`${v}% on time`, '']} />
-                      <Bar dataKey="onTime" radius={[0, 6, 6, 0]}>
+                      <Bar
+                        dataKey="onTime"
+                        radius={[0, 6, 6, 0]}
+                        cursor="pointer"
+                        onClick={(data) => navigate(`/?route=${data.payload.routeId}`)}
+                      >
                         {routeChartData.map((d) => (
                           <Cell key={d.name} fill={d.group === 'best' ? '#22c55e' : '#ef4444'} />
                         ))}
@@ -321,7 +335,9 @@ export function TrendsPage() {
             {congestionChartData.length > 0 && (
               <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
                 <div className="font-display text-sm font-semibold text-white/90 mb-1">Most congested roads</div>
-                <div className="text-xs text-white/40 mb-3">Average speed over the capture window - lower is worse</div>
+                <div className="text-xs text-white/40 mb-3">
+                  Average speed over the capture window - lower is worse - click a bar to open the congestion overlay
+                </div>
                 <div className="h-64 w-full">
                   <ResponsiveContainer>
                     <BarChart data={congestionChartData} layout="vertical" margin={{ left: 8, right: 24 }}>
@@ -338,7 +354,7 @@ export function TrendsPage() {
                         formatter={(v: number) => [`${v} km/h avg`, '']}
                         labelFormatter={(_l, p) => (p && p[0] ? p[0].payload.fullName : '')}
                       />
-                      <Bar dataKey="avgSpeedKmh" radius={[0, 6, 6, 0]}>
+                      <Bar dataKey="avgSpeedKmh" radius={[0, 6, 6, 0]} cursor="pointer" onClick={() => navigate('/?congestion=1')}>
                         {congestionChartData.map((d) => (
                           <Cell key={d.name} fill={`rgba(249, 115, 22, ${d.opacity.toFixed(2)})`} />
                         ))}
