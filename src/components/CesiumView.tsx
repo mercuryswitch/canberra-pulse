@@ -94,7 +94,18 @@ const POLL_MS = 8_000;
 // fixes never causes a visible stall while still not coasting forever if
 // a vehicle genuinely stops reporting.
 const MAX_EXTRAPOLATION_SPEED_MPS = 30; // ~108 km/h
-const COAST_MAX_SECONDS = 30;
+// Was 30s, tuned for the live app's original ~15-30s live-poll cadence.
+// ACTBusEventLoader has run on a 5-minute Fabric schedule since the
+// historic-capture setup, though - confirmed directly against live data
+// (2026-09-28): median real gap between two fixes for the same in-transit
+// vehicle is 300s, both bus and rail. At 30s a vehicle coasted for the
+// first 10% of that gap, then sat frozen for the remaining ~4.5 minutes -
+// the actual cause of "not seeing vehicles move" (Ross), not a rendering
+// bug. Raised to just under the measured real gap so vehicles keep
+// gliding for nearly the whole interval instead of freezing early; a
+// vehicle whose next fix is late or missing still just holds in place,
+// same safe fallback as before.
+const COAST_MAX_SECONDS = 280;
 
 // Light rail vehicle IDs follow the "LRV<n>" pattern in this feed; everything
 // else is a bus. Model choice (and, before this, marker color) encodes type.
@@ -624,6 +635,26 @@ export function CesiumView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
+
+  // Live data stream bubble (2026-09-28, Ross's ask: "nice to see the data
+  // coming in") - the most recently-updated vehicles, most recent first.
+  // Genuinely reads busDataRef's own ts per vehicle rather than "just
+  // fetched this poll", since the underlying feed lands on its own 5-minute
+  // schedule (see COAST_MAX_SECONDS) - a vehicle can be the most recent
+  // arrival even a few minutes into this app's own 8s poll cycle.
+  const LIVE_FEED_SIZE = 8;
+  const liveFeed = useMemo(() => {
+    return Array.from(busDataRef.current.values())
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, LIVE_FEED_SIZE);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- busDataRef is a
+    // ref; pollTick is the actual trigger for recomputing this each poll.
+  }, [pollTick]);
+  function formatFeedAge(ms: number): string {
+    const sec = Math.max(0, Math.round(ms / 1000));
+    if (sec < 60) return `${sec}s ago`;
+    return `${Math.round(sec / 60)}m ago`;
+  }
 
   // Full route list, live counts merged in (2026-09-09, Ross's ask: "routes
   // split to active and non active, still shown but greyed out") - routeCounts
@@ -2460,6 +2491,39 @@ export function CesiumView() {
         >
           ⤡
         </button>
+      </div>
+      {/* Live data stream bubble (2026-09-28, Ross's ask) - always visible,
+          not gated behind any tab, since the point is reassurance that data
+          is genuinely arriving regardless of what else is on screen.
+          Positioned above the tilt control rather than sharing its corner. */}
+      <div className="absolute bottom-24 right-4 z-30 w-60 rounded-xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden">
+        <div className="px-3 py-1.5 border-b border-white/10 flex items-center gap-1.5">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+          <span className="font-display text-[10px] uppercase tracking-wide text-white/50">Live data stream</span>
+        </div>
+        <div className="max-h-48 overflow-y-auto">
+          {liveFeed.length === 0 ? (
+            <div className="px-3 py-2 text-[11px] text-white/40">Waiting for data…</div>
+          ) : (
+            liveFeed.map((b) => (
+              <div
+                key={b.id}
+                className="px-3 py-1 flex items-center justify-between gap-2 text-[11px] border-b border-white/5 last:border-0"
+              >
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ backgroundColor: isLightRail(b.id) ? TYPE_COLOR.rail : TYPE_COLOR.bus }}
+                  />
+                  <span className="truncate">
+                    {isLightRail(b.id) ? 'Rail' : 'Bus'} {b.id} · R{b.routeId}
+                  </span>
+                </span>
+                <span className="text-white/40 shrink-0">{formatFeedAge(Date.now() - b.ts)}</span>
+              </div>
+            ))
+          )}
+        </div>
       </div>
       {selectedBus && (
         <VehiclePanel
