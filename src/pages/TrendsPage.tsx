@@ -110,9 +110,9 @@ const OBSERVATIONS: Observation[] = [
     body: "The three highest-ridership bus routes rank among the worst for on-time performance. Popularity doesn't buy reliability on this network - if anything, it's the opposite.",
   },
   {
-    headline: "Congestion isn't spread across Canberra - it's one interchange",
-    stat: '1 hotspot',
-    body: 'The worst-performing road segments over the whole capture window cluster almost entirely around Parkes Way / Edinburgh Ave / Vernon Circle / Constitution Ave, next to Civic.',
+    headline: "Congestion concentrates at a handful of hotspots, not evenly across Canberra",
+    stat: 'Civic-led',
+    body: "The worst-performing segments are led by the Parkes Way / Edinburgh Ave / Constitution Ave cluster near Civic, with a second, smaller cluster emerging around Belconnen as more data accumulates - worth re-checking live rather than quoting a fixed leaderboard.",
   },
   {
     headline: 'There is a real commute peak - just not where the live map shows it',
