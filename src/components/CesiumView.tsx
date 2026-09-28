@@ -877,7 +877,14 @@ export function CesiumView() {
     if (!viewer) return;
     for (const entity of equityEntitiesRef.current) viewer.entities.remove(entity);
     equityEntitiesRef.current = [];
-    if (equityRanking.length === 0) return;
+    // Missing this guard (unlike the congestion/heatmap effects, which both
+    // check their own showX) meant every SA1 in the ACT painted itself the
+    // moment population data loaded - which now happens unconditionally at
+    // startup to feed the permanent "Underserved areas" counter - regardless
+    // of whether Availability was ever opened. Confirmed directly (2026-09-
+    // 28, Ross): this is the "heat map" that confusingly renders on first
+    // load with nothing selected.
+    if (!showEquity || equityRanking.length === 0) return;
 
     equityEntitiesRef.current = equityRanking.map(({ cell, gap }) => {
       const intensity = Math.max(0, Math.min(1, (gap + 1) / 2));
@@ -896,7 +903,7 @@ export function CesiumView() {
       for (const entity of equityEntitiesRef.current) viewer.entities.remove(entity);
       equityEntitiesRef.current = [];
     };
-  }, [equityRanking]);
+  }, [showEquity, equityRanking]);
 
   // Yellow -> orange -> red, deliberately no green (2026-09-08, Ross:
   // "it needs to be all yellow/orange/red scale... showing a little too
@@ -2211,7 +2218,10 @@ export function CesiumView() {
           as in the Helsinki style... make the map a pane within the dash").
           Fixed chrome, never scrolls away. */}
       <header className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 shrink-0">
-        <div className="font-display text-base font-semibold tracking-tight">Canberra Pulse</div>
+        <div className="flex items-baseline gap-2 min-w-0">
+          <div className="font-display text-base font-semibold tracking-tight shrink-0">Canberra Pulse</div>
+          <div className="text-xs text-white/40 truncate">Live transit digital twin for the ACT</div>
+        </div>
         <div className="flex items-center gap-2">
           {loaderStatus && (
             <span
@@ -2254,6 +2264,12 @@ export function CesiumView() {
             does enumerate every route_id). Each card's number is the live
             count only - honestly labelled as that, not paired with a
             fabricated "available" figure. */}
+        {/* Ordered to exactly match the left nav rail below (2026-09-28,
+            Ross's ask: "each of the selectors should be in sequence L-R and
+            up to down") - same activeTab()/selectTab() single source of
+            truth already meant a click on one side always highlighted the
+            other, but the two lists showing different orders made that
+            correspondence hard to see at a glance. */}
         <CounterCard
           icon="🚌"
           label="Bus"
@@ -2271,28 +2287,20 @@ export function CesiumView() {
           onClick={() => selectTab('rail')}
         />
         <CounterCard
-          icon="⏱"
-          label="On-time median"
-          value={onTimeSummary ? `${onTimeSummary.median > 0 ? '+' : ''}${onTimeSummary.median}m` : '—'}
-          sub={onTimeSummary ? `n=${onTimeSummary.n}` : 'no data yet'}
-          active={activeTab() === 'ontime'}
-          onClick={() => selectTab('ontime')}
+          icon="📍"
+          label="Near me"
+          value={nearMeActive ? String(nearestStops.length) : '—'}
+          sub={nearMeActive ? 'nearby stops' : 'tap to activate'}
+          active={activeTab() === 'nearme'}
+          onClick={() => selectTab('nearme')}
         />
         <CounterCard
-          icon="🚦"
-          label="Congestion"
-          value={congestionHeadline ? congestionHeadline.avgScore.toFixed(1) : '—'}
-          sub={congestionHeadline ? `${congestionHeadline.congestedCount} congested` : 'no data yet'}
-          active={activeTab() === 'congestion'}
-          onClick={() => selectTab('congestion')}
-        />
-        <CounterCard
-          icon="🏘️"
-          label="Underserved areas"
-          value={equityHeadline ? String(equityHeadline.underservedCount) : '—'}
-          sub={equityHeadline ? `of ${equityHeadline.totalAreas} SA1 areas` : 'no data yet'}
-          active={activeTab() === 'equity'}
-          onClick={() => selectTab('equity')}
+          icon="🛣️"
+          label="Active routes"
+          value={String(routeCounts.length)}
+          sub={`${routeCounts.reduce((sum, r) => sum + r.count, 0)} vehicles`}
+          active={activeTab() === 'routes'}
+          onClick={() => selectTab('routes')}
         />
         <CounterCard
           icon="⚠️"
@@ -2311,12 +2319,28 @@ export function CesiumView() {
           onClick={() => selectTab('heatmap')}
         />
         <CounterCard
-          icon="🛣️"
-          label="Active routes"
-          value={String(routeCounts.length)}
-          sub={`${routeCounts.reduce((sum, r) => sum + r.count, 0)} vehicles`}
-          active={activeTab() === 'routes'}
-          onClick={() => selectTab('routes')}
+          icon="⏱"
+          label="On-time median"
+          value={onTimeSummary ? `${onTimeSummary.median > 0 ? '+' : ''}${onTimeSummary.median}m` : '—'}
+          sub={onTimeSummary ? `n=${onTimeSummary.n}` : 'no data yet'}
+          active={activeTab() === 'ontime'}
+          onClick={() => selectTab('ontime')}
+        />
+        <CounterCard
+          icon="🏘️"
+          label="Underserved areas"
+          value={equityHeadline ? String(equityHeadline.underservedCount) : '—'}
+          sub={equityHeadline ? `of ${equityHeadline.totalAreas} SA1 areas` : 'no data yet'}
+          active={activeTab() === 'equity'}
+          onClick={() => selectTab('equity')}
+        />
+        <CounterCard
+          icon="🚦"
+          label="Congestion"
+          value={congestionHeadline ? congestionHeadline.avgScore.toFixed(1) : '—'}
+          sub={congestionHeadline ? `${congestionHeadline.congestedCount} congested` : 'no data yet'}
+          active={activeTab() === 'congestion'}
+          onClick={() => selectTab('congestion')}
         />
       </div>
 
