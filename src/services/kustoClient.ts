@@ -25,7 +25,14 @@
  *   VITE_KUSTO_CLUSTER   Eventhouse cluster URI
  *   VITE_KUSTO_DATABASE  KQL database name
  *   VITE_ENTRA_CLIENT_ID Entra app (client) ID used for interactive sign-in
- *   VITE_ENTRA_TENANT_ID Entra tenant ID
+ *   VITE_ENTRA_TENANT_ID MSAL authority tenant segment - a specific tenant
+ *                        GUID restricts sign-in to that tenant alone;
+ *                        'organizations' allows any work/school tenant;
+ *                        'common' (2026-09-28) additionally allows personal
+ *                        Microsoft accounts - broadest, for public sharing.
+ *                        Requires the App Registration's own "Supported
+ *                        account types" to match, or Entra rejects accounts
+ *                        the code would otherwise allow.
  *   VITE_KUSTO_SCOPE     (optional) override for the token scope
  */
 import {
@@ -41,7 +48,7 @@ import {
 const CLUSTER = import.meta.env.VITE_KUSTO_CLUSTER as string | undefined;
 const DATABASE = (import.meta.env.VITE_KUSTO_DATABASE as string | undefined) ?? 'ACTGovEventHouse';
 const CLIENT_ID = import.meta.env.VITE_ENTRA_CLIENT_ID as string | undefined;
-const TENANT_ID = (import.meta.env.VITE_ENTRA_TENANT_ID as string | undefined) ?? 'organizations';
+const TENANT_ID = (import.meta.env.VITE_ENTRA_TENANT_ID as string | undefined) ?? 'common';
 // The Eventhouse accepts a token whose audience is the cluster URI and whose
 // scope is `user_impersonation`. We request that scope (rather than `.default`)
 // so Entra grants it via dynamic consent even though the app registration has
