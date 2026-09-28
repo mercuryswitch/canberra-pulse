@@ -32,6 +32,11 @@ rayfin/.env*
 rayfin/.deployments.json
 rayfin/.temp/
 
+# Written into public/ at build time by rayfin-cli 1.35+ (workspace/item/
+# tenant IDs, publishable key) - regenerated every build, not hand-maintained
+# source. Same values already documented as non-secret in SECURITY.md.
+public/rayfin.config.json
+
 # Editor / OS
 .idea
 .DS_Store
