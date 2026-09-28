@@ -1,5 +1,6 @@
 import {
   CallbackPositionProperty,
+  CallbackProperty,
   CameraEventType,
   Cartesian2,
   Cartesian3,
@@ -8,7 +9,6 @@ import {
   ConstantPositionProperty,
   createGooglePhotorealistic3DTileset,
   createOsmBuildingsAsync,
-  ExtrapolationType,
   HeadingPitchRoll,
   HeightReference,
   ImageryLayer,
@@ -18,9 +18,7 @@ import {
   LabelStyle,
   Math as CesiumMath,
   OpenStreetMapImageryProvider,
-  Quaternion,
   Rectangle,
-  SampledProperty,
   Terrain,
   Transforms,
   Viewer,
@@ -41,6 +39,7 @@ import { resumePendingTriggerIfAny, triggerDataLoaders } from '@/services/fabric
 import { connectDataInteractive, KustoInteractionRequiredError } from '@/services/kustoClient';
 import { getPopulationCells, preloadPopulation, type PopulationCell } from '@/services/populationService';
 import {
+  bearingAtDistance,
   getHeadsignForTrip,
   getShapeById,
   getShapeForTrip,
@@ -274,7 +273,7 @@ export function CesiumView() {
   const viewerRef = useRef<Viewer | null>(null);
   const entitiesRef = useRef<Map<string, Entity>>(new Map());
   const positionsRef = useRef<Map<string, CallbackPositionProperty>>(new Map());
-  const orientationsRef = useRef<Map<string, SampledProperty>>(new Map());
+  const orientationsRef = useRef<Map<string, CallbackProperty>>(new Map());
   const lastSampleTsRef = useRef<Map<string, number>>(new Map());
   const lastTripIdRef = useRef<Map<string, string>>(new Map());
   // #3 bus bunching (2026-09-05): each vehicle's position along its own
@@ -1805,7 +1804,6 @@ export function CesiumView() {
         for (const bus of feed.buses) {
           seen.add(bus.id);
           busDataRef.current.set(bus.id, bus);
-          const sampleTime = JulianDate.fromDate(new Date(bus.ts));
 
           // A trip_id change means a genuinely different journey (the
           // vehicle finished one trip and started another, often on a
@@ -1824,8 +1822,8 @@ export function CesiumView() {
           // updates much less often, so there's more real-world distance
           // between "last sample of trip A" and "first sample of trip B".
           // Fix: wipe this vehicle's position/orientation history outright
-          // on a trip change, so the new trip starts a clean SampledProperty
-          // with nothing to extrapolate from until its own second sample.
+          // on a trip change, so the new trip starts clean with nothing to
+          // extrapolate from until its own second sample.
           if (lastTripIdRef.current.get(bus.id) !== bus.tripId) {
             positionsRef.current.delete(bus.id);
             orientationsRef.current.delete(bus.id);
@@ -1881,21 +1879,48 @@ export function CesiumView() {
             positionsRef.current.set(bus.id, positionProperty);
           }
 
-          // Orientation from the feed's own reported bearing, not derived
-          // from position motion (VelocityOrientationProperty needs a real
-          // rate of change - it doesn't work with a snapped/map-matched
-          // position sampled only every ~15s, and defaulted to a fixed
-          // heading). Kept on HOLD deliberately, unlike position above:
-          // extrapolating a *rotation* for minutes risks visibly spinning
-          // if two real bearing readings disagree slightly, whereas a
-          // heading that snaps cleanly to each new real reading is safer
-          // than one that drifts.
-          let sampledOrientation = orientationsRef.current.get(bus.id);
-          if (!sampledOrientation) {
-            sampledOrientation = new SampledProperty(Quaternion);
-            sampledOrientation.forwardExtrapolationType = ExtrapolationType.HOLD;
-            sampledOrientation.forwardExtrapolationDuration = 0;
-            orientationsRef.current.set(bus.id, sampledOrientation);
+          // Orientation from the shape's own tangent direction at the
+          // vehicle's current (possibly coasting) position, not the feed's
+          // raw bearing held statically. Ross (2026-09-28): "should snap to
+          // the route" - once COAST_MAX_SECONDS let a vehicle coast for
+          // minutes at a time (long enough to visibly round a real bend),
+          // holding the last reported bearing meant the model kept facing
+          // wherever it was heading minutes ago, not the way the road it's
+          // being drawn on actually goes right now. A CallbackProperty,
+          // re-evaluated every frame like the position callback above (and
+          // deliberately re-deriving the same projected distance rather
+          // than sharing state with it - Cesium invokes each independently,
+          // and the duplicated arithmetic is cheap), rather than a
+          // SampledProperty snapped once per real fix. Falls back to the
+          // feed's own raw bearing only when there's no shape to take a
+          // tangent from at all.
+          let orientationProperty = orientationsRef.current.get(bus.id);
+          if (!orientationProperty) {
+            const vehicleId = bus.id;
+            orientationProperty = new CallbackProperty((time) => {
+              const track = vehicleTrackRef.current.get(vehicleId);
+              const nowMs = JulianDate.toDate(time ?? JulianDate.now()).getTime();
+              let lat: number;
+              let lon: number;
+              let headingDeg: number;
+              if (track?.shape) {
+                const elapsedSec = Math.max(0, Math.min((nowMs - track.atTimeMs) / 1000, COAST_MAX_SECONDS));
+                const projected = track.distanceAlong + track.speedMps * elapsedSec;
+                const pt = pointAtDistance(track.shape, projected);
+                lat = pt.lat;
+                lon = pt.lon;
+                headingDeg = bearingAtDistance(track.shape, projected);
+              } else {
+                const live = busDataRef.current.get(vehicleId);
+                lat = track?.fallbackLat ?? live?.lat ?? 0;
+                lon = track?.fallbackLon ?? live?.lon ?? 0;
+                headingDeg = live?.bearing ?? 0;
+              }
+              const position = Cartesian3.fromDegrees(lon, lat);
+              const heading = CesiumMath.toRadians(headingDeg + MODEL_HEADING_OFFSET_DEG);
+              return Transforms.headingPitchRollQuaternion(position, new HeadingPitchRoll(heading, 0, 0));
+            }, false);
+            orientationsRef.current.set(bus.id, orientationProperty);
           }
 
           // Only process a sample when the feed's own reported timestamp has
@@ -1972,13 +1997,6 @@ export function CesiumView() {
               fallbackLon: lon,
             });
 
-            const position = Cartesian3.fromDegrees(lon, lat);
-            const heading = CesiumMath.toRadians(bus.bearing + MODEL_HEADING_OFFSET_DEG);
-            const hpr = new HeadingPitchRoll(heading, 0, 0);
-            sampledOrientation.addSample(
-              sampleTime,
-              Transforms.headingPitchRollQuaternion(position, hpr),
-            );
             lastSampleTsRef.current.set(bus.id, bus.ts);
           }
 
@@ -1986,7 +2004,7 @@ export function CesiumView() {
             const entity = viewer.entities.add({
               id: bus.id,
               position: positionProperty,
-              orientation: sampledOrientation,
+              orientation: orientationProperty,
               name: `Vehicle ${bus.id} (route ${bus.routeId})`,
               // RESOLVED (2026-08-25 night): the "model never renders for
               // light rail" symptom was never about points vs models, or

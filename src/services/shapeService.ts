@@ -223,3 +223,31 @@ export function pointAtDistance(shape: ShapePoint[], distance: number): { lat: n
   const last = shape[shape.length - 1];
   return { lat: last.lat, lon: last.lon };
 }
+
+/**
+ * Compass bearing (degrees clockwise from true north - same convention as
+ * the feed's own `bearing` field) of the shape's own direction of travel at
+ * a given distance along it. Ross (2026-09-28): "should snap to the route" -
+ * once COAST_MAX_SECONDS let a vehicle coast for minutes at a time (long
+ * enough to visibly round a real bend), holding the stale raw GPS bearing
+ * from its last fix started drawing it facing the wrong way mid-turn. This
+ * derives heading from the same polyline position is already snapped to,
+ * so the model always faces the way the road/track actually runs under it,
+ * never the increasingly-stale direction it happened to be facing minutes
+ * ago at its last real fix.
+ */
+export function bearingAtDistance(shape: ShapePoint[], distance: number): number {
+  const totalLength = shape[shape.length - 1].dist;
+  const clamped = Math.max(0, Math.min(distance, totalLength));
+  const STEP_METERS = 5;
+  const atEnd = clamped >= totalLength;
+  const a = pointAtDistance(shape, atEnd ? clamped - STEP_METERS : clamped);
+  const b = pointAtDistance(shape, atEnd ? clamped : clamped + STEP_METERS);
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  const bearingRad = Math.atan2(y, x);
+  return ((bearingRad * 180) / Math.PI + 360) % 360;
+}
