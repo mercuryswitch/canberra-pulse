@@ -2505,23 +2505,38 @@ export function CesiumView() {
           {liveFeed.length === 0 ? (
             <div className="px-3 py-2 text-[11px] text-white/40">Waiting for data…</div>
           ) : (
-            liveFeed.map((b) => (
-              <div
-                key={b.id}
-                className="px-3 py-1 flex items-center justify-between gap-2 text-[11px] border-b border-white/5 last:border-0"
-              >
-                <span className="flex items-center gap-1.5 min-w-0">
-                  <span
-                    className="w-1.5 h-1.5 rounded-full shrink-0"
-                    style={{ backgroundColor: isLightRail(b.id) ? TYPE_COLOR.rail : TYPE_COLOR.bus }}
-                  />
-                  <span className="truncate">
-                    {isLightRail(b.id) ? 'Rail' : 'Bus'} {b.id} · R{b.routeId}
-                  </span>
-                </span>
-                <span className="text-white/40 shrink-0">{formatFeedAge(Date.now() - b.ts)}</span>
-              </div>
-            ))
+            liveFeed.map((b) => {
+              // Temporary diagnostic row (2026-09-28) - reads the exact
+              // internal state the coast callback uses, so "is it actually
+              // moving" is answerable by looking at the screen instead of
+              // guessing from outside the browser. Remove once the motion
+              // question is settled either way.
+              const track = vehicleTrackRef.current.get(b.id);
+              const diag = !track
+                ? 'no track yet'
+                : !track.shape
+                  ? 'no shape match'
+                  : `${track.speedMps.toFixed(1)} m/s`;
+              return (
+                <div key={b.id} className="px-3 py-1 border-b border-white/5 last:border-0 text-[11px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="w-1.5 h-1.5 rounded-full shrink-0"
+                        style={{ backgroundColor: isLightRail(b.id) ? TYPE_COLOR.rail : TYPE_COLOR.bus }}
+                      />
+                      <span className="truncate">
+                        {isLightRail(b.id) ? 'Rail' : 'Bus'} {b.id} · R{b.routeId}
+                      </span>
+                    </span>
+                    <span className="text-white/40 shrink-0">{formatFeedAge(Date.now() - b.ts)}</span>
+                  </div>
+                  <div className="text-white/30 pl-3">
+                    {b.status} · {diag}
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
       </div>
