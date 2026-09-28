@@ -225,6 +225,70 @@ export function pointAtDistance(shape: ShapePoint[], distance: number): { lat: n
 }
 
 /**
+ * Best-effort road placement for a vehicle whose own trip has no map-matched
+ * shape at all (unknown/changed trip_id - see CesiumView's fallbackLat/Lon).
+ * Rather than trusting the raw, un-map-matched GPS fix outright - which then
+ * renders with HeightReference.CLAMP_TO_GROUND wherever that raw point lands,
+ * including on top of a building if ordinary urban-canyon GPS noise puts it
+ * off the real road - this snaps to the nearest point on *any* known route
+ * shape, so the vehicle at least sits on a real road surface even though we
+ * don't know which specific route/direction it's actually running.
+ *
+ * Ross (2026-09-28): "floating above the road again... more like 3rd storey
+ * in the city, buses about 5m off ground, trains fine" - root cause traced
+ * to exactly this path. Buses vastly outnumber light rail and draw from 160+
+ * routes, so they hit an unmatched trip_id far more often than light rail's
+ * handful of always-present trip patterns; every one of those unmatched
+ * vehicles was rendering at its raw fix, correctly clamped to whatever's
+ * really there - a nearby tall building in the CBD (hence "3rd storey"),
+ * something shorter elsewhere (hence "~5m").
+ *
+ * Runs once per poll (not per render frame) for the small minority of
+ * vehicles with no shape match, so an unindexed scan over every known shape
+ * is cheap enough - no need for a spatial index at this call frequency.
+ */
+export async function nearestPointOnAnyShape(
+  lat: number,
+  lon: number,
+): Promise<{ lat: number; lon: number } | null> {
+  const snap = await loadSnapshot();
+  if (!snap) return null;
+
+  const cosRef = Math.cos((lat * Math.PI) / 180);
+  const px = lon * cosRef;
+  const py = lat;
+
+  let best: { lat: number; lon: number } | null = null;
+  let bestD2 = Infinity;
+
+  for (const shapeId of Object.keys(snap.shapes)) {
+    const shape = await getShapeById(shapeId);
+    if (!shape) continue;
+    for (let i = 0; i < shape.length - 1; i++) {
+      const a = shape[i];
+      const b = shape[i + 1];
+      const ax = a.lon * cosRef;
+      const ay = a.lat;
+      const bx = b.lon * cosRef;
+      const by = b.lat;
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const sx = ax + t * dx;
+      const sy = ay + t * dy;
+      const d2 = (px - sx) ** 2 + (py - sy) ** 2;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = { lat: a.lat + t * (b.lat - a.lat), lon: a.lon + t * (b.lon - a.lon) };
+      }
+    }
+  }
+  return best;
+}
+
+/**
  * Compass bearing (degrees clockwise from true north - same convention as
  * the feed's own `bearing` field) of the shape's own direction of travel at
  * a given distance along it. Ross (2026-09-28): "should snap to the route" -

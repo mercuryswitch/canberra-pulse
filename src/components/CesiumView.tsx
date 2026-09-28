@@ -45,6 +45,7 @@ import {
   getShapeForTrip,
   getShapeIdForTrip,
   haversineMeters,
+  nearestPointOnAnyShape,
   pointAtDistance,
   preloadShapes,
   shapeOrigin,
@@ -1986,6 +1987,18 @@ export function CesiumView() {
               }
             } else {
               vehicleProgressRef.current.delete(bus.id);
+              // No shape for this trip_id at all - don't trust the raw fix
+              // outright (see nearestPointOnAnyShape's doc comment: this is
+              // the "floating above the road" root cause). Snap onto
+              // whichever known route happens to be nearest instead, so
+              // CLAMP_TO_GROUND has a real road surface to clamp to. Falls
+              // through to the untouched raw fix only if the shapes
+              // snapshot itself never loaded.
+              const nearestOnRoad = await nearestPointOnAnyShape(bus.lat, bus.lon);
+              if (nearestOnRoad) {
+                lat = nearestOnRoad.lat;
+                lon = nearestOnRoad.lon;
+              }
             }
 
             vehicleTrackRef.current.set(bus.id, {
@@ -2510,6 +2523,106 @@ export function CesiumView() {
           ⤡
         </button>
       </div>
+      {/* On-time gauge/histogram/trend bubble (2026-09-28, Ross's ask: "put
+          the gauges for the on time selection in a floating bubble like the
+          live data stream, but only when that tab is selected") - moved out
+          of the docked aside (which still shows the per-vehicle on-time
+          list) into its own floating card over the map, matching the live
+          data stream bubble's styling. Trend is *this session only* (see
+          medianHistory's own doc comment) - durable multi-day history needs
+          the delay-at-ingestion pipeline still in progress. */}
+      {showOnTime && onTimeSummary && (
+        <div className="absolute top-4 right-4 z-30 w-64 rounded-xl border border-white/10 bg-slate-950/85 text-white shadow-2xl backdrop-blur-xl overflow-hidden">
+          <div className="px-3 py-1.5 border-b border-white/10 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0" />
+            <span className="font-display text-[10px] uppercase tracking-wide text-white/50">
+              On-time performance
+            </span>
+          </div>
+          <div className="max-h-[70vh] overflow-y-auto text-xs px-3 py-3 flex flex-col gap-4">
+            <div>
+              <div className="font-display text-white/50 font-medium mb-1">Network median, live</div>
+              <svg viewBox="0 0 200 115" className="w-full">
+                <path d={gaugeArcPath(100, 100, 80, -GAUGE_RANGE_MINUTES, -2)} stroke="#2979FF" strokeWidth={14} fill="none" />
+                <path d={gaugeArcPath(100, 100, 80, -2, 2)} stroke="#22c55e" strokeWidth={14} fill="none" />
+                <path d={gaugeArcPath(100, 100, 80, 2, GAUGE_RANGE_MINUTES)} stroke="#dc2626" strokeWidth={14} fill="none" />
+                {(() => {
+                  const tip = polarPoint(100, 100, 68, gaugeAngleDeg(onTimeSummary.median));
+                  return (
+                    <line x1={100} y1={100} x2={tip.x} y2={tip.y} stroke="#f1f5f9" strokeWidth={3} strokeLinecap="round" />
+                  );
+                })()}
+                <circle cx={100} cy={100} r={5} fill="#f1f5f9" />
+                <text x={20} y={112} fontSize={9} fill="#cbd5e1">
+                  early
+                </text>
+                <text x={165} y={112} fontSize={9} fill="#cbd5e1">
+                  late
+                </text>
+              </svg>
+            </div>
+            <div>
+              <div className="font-display text-white/50 font-medium mb-1">
+                Median trend, this session ({medianHistory.length} polls)
+              </div>
+              {medianHistory.length < 2 ? (
+                <div className="text-white/40">Collecting more polls…</div>
+              ) : (
+                <svg viewBox="0 0 260 60" className="w-full">
+                  <line x1={0} y1={30} x2={260} y2={30} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
+                  <polyline
+                    fill="none"
+                    stroke="#f1f5f9"
+                    strokeWidth={2}
+                    points={medianHistory
+                      .map((p, i) => {
+                        const x = (i / (medianHistory.length - 1)) * 260;
+                        const y = 30 - (clampGaugeMinutes(p.median) / GAUGE_RANGE_MINUTES) * 28;
+                        return `${x},${y}`;
+                      })
+                      .join(' ')}
+                  />
+                </svg>
+              )}
+            </div>
+            <div>
+              <div className="font-display text-white/50 font-medium mb-1">
+                Distribution right now (n={onTimeEntries.length})
+              </div>
+              <svg viewBox="0 0 260 70" className="w-full">
+                {(() => {
+                  const counts = HISTOGRAM_BINS.map(
+                    (bin) =>
+                      onTimeEntries.filter(
+                        (e) => e.punctuality.delayMinutes >= bin.min && e.punctuality.delayMinutes < bin.max,
+                      ).length,
+                  );
+                  const maxCount = Math.max(1, ...counts);
+                  const barWidth = 260 / HISTOGRAM_BINS.length;
+                  return HISTOGRAM_BINS.map((bin, i) => {
+                    const h = (counts[i] / maxCount) * 50;
+                    return (
+                      <g key={bin.label}>
+                        <rect
+                          x={i * barWidth + 2}
+                          y={55 - h}
+                          width={barWidth - 4}
+                          height={h}
+                          fill={bin.color}
+                          opacity={0.85}
+                        />
+                        <text x={i * barWidth + barWidth / 2} y={67} fontSize={7} fill="#cbd5e1" textAnchor="middle">
+                          {bin.label}
+                        </text>
+                      </g>
+                    );
+                  });
+                })()}
+              </svg>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Live data stream bubble (2026-09-28, Ross's ask) - always visible,
           not gated behind any tab, since the point is reassurance that data
           is genuinely arriving regardless of what else is on screen.
@@ -3340,95 +3453,6 @@ export function CesiumView() {
               </button>
             ))
           )}
-        </div>
-      )}
-      {/* On-time gauge/histogram/trend pop-out (2026-09-08, Ross's ask) -
-          a separate panel on the right, doesn't touch the on-time block on
-          the left at all. Trend is *this session only* (see
-          medianHistory's own doc comment) - durable multi-day history
-          needs the delay-at-ingestion pipeline still in progress. */}
-      {showOnTime && onTimeSummary && (
-        <div className="text-xs px-3 py-3 flex flex-col gap-4">
-          <div>
-            <div className="font-display text-white/50 font-medium mb-1">Network median, live</div>
-            <svg viewBox="0 0 200 115" className="w-full">
-              <path d={gaugeArcPath(100, 100, 80, -GAUGE_RANGE_MINUTES, -2)} stroke="#2979FF" strokeWidth={14} fill="none" />
-              <path d={gaugeArcPath(100, 100, 80, -2, 2)} stroke="#22c55e" strokeWidth={14} fill="none" />
-              <path d={gaugeArcPath(100, 100, 80, 2, GAUGE_RANGE_MINUTES)} stroke="#dc2626" strokeWidth={14} fill="none" />
-              {(() => {
-                const tip = polarPoint(100, 100, 68, gaugeAngleDeg(onTimeSummary.median));
-                return (
-                  <line x1={100} y1={100} x2={tip.x} y2={tip.y} stroke="#f1f5f9" strokeWidth={3} strokeLinecap="round" />
-                );
-              })()}
-              <circle cx={100} cy={100} r={5} fill="#f1f5f9" />
-              <text x={20} y={112} fontSize={9} fill="#cbd5e1">
-                early
-              </text>
-              <text x={165} y={112} fontSize={9} fill="#cbd5e1">
-                late
-              </text>
-            </svg>
-          </div>
-          <div>
-            <div className="font-display text-white/50 font-medium mb-1">
-              Median trend, this session ({medianHistory.length} polls)
-            </div>
-            {medianHistory.length < 2 ? (
-              <div className="text-white/40">Collecting more polls…</div>
-            ) : (
-              <svg viewBox="0 0 260 60" className="w-full">
-                <line x1={0} y1={30} x2={260} y2={30} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
-                <polyline
-                  fill="none"
-                  stroke="#f1f5f9"
-                  strokeWidth={2}
-                  points={medianHistory
-                    .map((p, i) => {
-                      const x = (i / (medianHistory.length - 1)) * 260;
-                      const y = 30 - (clampGaugeMinutes(p.median) / GAUGE_RANGE_MINUTES) * 28;
-                      return `${x},${y}`;
-                    })
-                    .join(' ')}
-                />
-              </svg>
-            )}
-          </div>
-          <div>
-            <div className="font-display text-white/50 font-medium mb-1">
-              Distribution right now (n={onTimeEntries.length})
-            </div>
-            <svg viewBox="0 0 260 70" className="w-full">
-              {(() => {
-                const counts = HISTOGRAM_BINS.map(
-                  (bin) =>
-                    onTimeEntries.filter(
-                      (e) => e.punctuality.delayMinutes >= bin.min && e.punctuality.delayMinutes < bin.max,
-                    ).length,
-                );
-                const maxCount = Math.max(1, ...counts);
-                const barWidth = 260 / HISTOGRAM_BINS.length;
-                return HISTOGRAM_BINS.map((bin, i) => {
-                  const h = (counts[i] / maxCount) * 50;
-                  return (
-                    <g key={bin.label}>
-                      <rect
-                        x={i * barWidth + 2}
-                        y={55 - h}
-                        width={barWidth - 4}
-                        height={h}
-                        fill={bin.color}
-                        opacity={0.85}
-                      />
-                      <text x={i * barWidth + barWidth / 2} y={67} fontSize={7} fill="#cbd5e1" textAnchor="middle">
-                        {bin.label}
-                      </text>
-                    </g>
-                  );
-                });
-              })()}
-            </svg>
-          </div>
         </div>
       )}
           </aside>
