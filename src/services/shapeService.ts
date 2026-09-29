@@ -138,7 +138,7 @@ const SNAP_FORWARD_WINDOW_METERS = 3000;
  * the same shape than to the vehicle's actual, continuous position - that
  * snaps to the wrong segment outright, which looks like the vehicle
  * veering off route no matter how well the path between two snapped
- * points is later smoothed. Ross (2026-09-08): hit this specifically on a
+ * points is later smoothed. MercurySwitch (2026-09-08): hit this specifically on a
  * curvy route, after the between-samples interpolation fix alone wasn't
  * enough. Falls back to an unrestricted global search when there's
  * nothing to anchor to yet (first fix, trip just started) or the window
@@ -234,7 +234,7 @@ export function pointAtDistance(shape: ShapePoint[], distance: number): { lat: n
  * shape, so the vehicle at least sits on a real road surface even though we
  * don't know which specific route/direction it's actually running.
  *
- * Ross (2026-09-28): "floating above the road again... more like 3rd storey
+ * MercurySwitch (2026-09-28): "floating above the road again... more like 3rd storey
  * in the city, buses about 5m off ground, trains fine" - root cause traced
  * to exactly this path. Buses vastly outnumber light rail and draw from 160+
  * routes, so they hit an unmatched trip_id far more often than light rail's
@@ -291,7 +291,7 @@ export async function nearestPointOnAnyShape(
 /**
  * Compass bearing (degrees clockwise from true north - same convention as
  * the feed's own `bearing` field) of the shape's own direction of travel at
- * a given distance along it. Ross (2026-09-28): "should snap to the route" -
+ * a given distance along it. MercurySwitch (2026-09-28): "should snap to the route" -
  * once COAST_MAX_SECONDS let a vehicle coast for minutes at a time (long
  * enough to visibly round a real bend), holding the stale raw GPS bearing
  * from its last fix started drawing it facing the wrong way mid-turn. This

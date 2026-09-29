@@ -1,6 +1,6 @@
 /**
  * Build-time ACT traffic road-segment geometry extraction, for the
- * congestion overlay (2026-09-08, Ross's find: ACT's public Addinsight
+ * congestion overlay (2026-09-08, MercurySwitch's find: ACT's public Addinsight
  * Bluetooth-detector traffic API).
  *
  * Geometry (which roads exist, their shape, free-flow baseline) is static/

@@ -31,10 +31,14 @@ confirm none was ever committed.
   `vite/gtfsStopArrivals.ts`, to bake static schedule/shape data into the
   production bundle. They deliberately carry no `VITE_` prefix — giving them
   one would bake them into the browser bundle, which must never happen.
-- **The live bus/rail positions and traffic feeds are pulled entirely inside
-  Fabric notebooks** (`ACTBusEventLoader`, `ACTStopIdLoader`,
-  `ACTTrafficLoader`), which run in your own Fabric workspace. Any
-  credentials those feeds need live there, not in this repository at all.
+- **The live bus/rail positions and traffic feeds are pulled inside Fabric
+  notebooks** (`ACTBusEventLoader`, `ACTStopIdLoader`, `ACTTrafficLoader`),
+  which run in your own Fabric workspace. Their source is included under
+  [`fabric/`](fabric/README.md) for transparency, but every credential they
+  need (`TC_GTFS_CLIENT_ID`, `TC_GTFS_CLIENT_SECRET`,
+  `EVENTSTREAM_CONNECTION_STRING`) is read from an environment variable at
+  runtime, never embedded in the committed notebook source - see
+  `fabric/README.md` for the exact variables each notebook needs.
 - **`VITE_ENTRA_CLIENT_ID`, `VITE_ENTRA_TENANT_ID`, `VITE_KUSTO_CLUSTER`,
   `VITE_KUSTO_DATABASE`, and the `VITE_FABRIC_*` / `VITE_RAYFIN_*`
   identifiers are not secrets.** They identify the author's Fabric

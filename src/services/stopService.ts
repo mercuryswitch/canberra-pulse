@@ -107,7 +107,7 @@ export async function getAllStopCoordinates(): Promise<{ lat: number; lon: numbe
 
 /**
  * Every route_id in the static schedule, whether or not it has a live
- * vehicle right now (2026-09-09, Ross's ask: "routes split to active and
+ * vehicle right now (2026-09-09, MercurySwitch's ask: "routes split to active and
  * non active, still shown but greyed out"). `arrivals` is keyed
  * stop_id -> route_id -> service_id -> times, so every route_id that ever
  * appears as a second-level key is a route that exists in today's GTFS,

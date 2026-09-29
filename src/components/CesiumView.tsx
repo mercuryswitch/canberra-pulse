@@ -100,7 +100,7 @@ const MAX_EXTRAPOLATION_SPEED_MPS = 30; // ~108 km/h
 // (2026-09-28): median real gap between two fixes for the same in-transit
 // vehicle is 300s, both bus and rail. At 30s a vehicle coasted for the
 // first 10% of that gap, then sat frozen for the remaining ~4.5 minutes -
-// the actual cause of "not seeing vehicles move" (Ross), not a rendering
+// the actual cause of "not seeing vehicles move" (MercurySwitch), not a rendering
 // bug. Raised to just under the measured real gap so vehicles keep
 // gliding for nearly the whole interval instead of freezing early; a
 // vehicle whose next fix is late or missing still just holds in place,
@@ -122,7 +122,7 @@ const VEHICLE_MODEL = { uri: '/models/bus.glb', scale: 1.15 };
 // The model's own authored "forward" axis doesn't line up with the axis
 // Cesium treats as heading-0-points-north, so every vehicle renders with the
 // same fixed rotational offset regardless of its (correct) real bearing.
-// Was +90 (fixed the original "facing 90 degrees sideways" bug), but Ross
+// Was +90 (fixed the original "facing 90 degrees sideways" bug), but MercurySwitch
 // confirmed 2026-09-05 that reads as driving backwards - flipping the sign
 // is exactly a 180 degree change (90 - (-90) = 180), which is precisely
 // "backwards" vs "sideways", so this is the anticipated fix, not a guess.
@@ -202,7 +202,7 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
   ];
   if (stopName) rows.push(['At stop', stopName]);
   if (punctuality) rows.push(['Punctuality', punctuality.label]);
-  // A bottom bar rather than a tall left-side panel (2026-09-05, Ross's
+  // A bottom bar rather than a tall left-side panel (2026-09-05, MercurySwitch's
   // ask) - the left side is where the Bus/Rail/Routes/etc. lists live, and
   // the old top-20/bottom-4 panel was covering them whenever a vehicle from
   // one of those lists was selected.
@@ -231,7 +231,7 @@ function VehiclePanel({ bus, onClose }: { bus: BusPosition; onClose: () => void 
 }
 
 /**
- * Permanent headline counter (2026-09-09, Ross's ask: "make the headline
+ * Permanent headline counter (2026-09-09, MercurySwitch's ask: "make the headline
  * figures permanent counters") - always visible in the top strip regardless
  * of which tab is open, unlike the more detailed per-tab headline cards
  * further down in the detail pane. Clicking one opens that tab, same as
@@ -359,7 +359,7 @@ export function CesiumView() {
       orientation: { pitch: CesiumMath.toRadians(-45) },
       duration: 0,
     });
-    // Explicit safeguard (2026-09-09, Ross reported Ctrl+left-drag tilt had
+    // Explicit safeguard (2026-09-09, MercurySwitch reported Ctrl+left-drag tilt had
     // stopped working) - nothing else in this file ever touches the camera
     // controller, so this should already be Cesium's stock default. Setting
     // it outright rather than leaving it implicit at least rules out any
@@ -432,7 +432,7 @@ export function CesiumView() {
 
     // Drive our own side panel off Cesium's selection state, rather than its
     // built-in infoBox, so the panel matches the app's own visual style.
-    // Route-line entities (2026-09-08, Ross's ask: "click on one by
+    // Route-line entities (2026-09-08, MercurySwitch's ask: "click on one by
     // location... rather than just the drop-down list") are tagged with a
     // `routeline:` id prefix specifically so this same listener can tell
     // them apart from a vehicle click and route it to setRouteFilter
@@ -467,7 +467,7 @@ export function CesiumView() {
   // rule as everything else here.
   const [routeFilter, setRouteFilter] = useState<string | null>(null);
   const [showRoutesList, setShowRoutesList] = useState(false);
-  // Drill-down from the Trends page (2026-09-28, Ross's ask: "click a route
+  // Drill-down from the Trends page (2026-09-28, MercurySwitch's ask: "click a route
   // on a chart, drill to that route on the map"). TrendsPage navigates here
   // with ?route= or ?mode= rather than sharing React state directly - it's
   // a different page, mounted fresh, so a URL param is the only channel
@@ -506,7 +506,7 @@ export function CesiumView() {
   const [populationCells, setPopulationCells] = useState<PopulationCell[]>([]);
   const [equityLoading, setEquityLoading] = useState(false);
   const equityEntitiesRef = useRef<Entity[]>([]);
-  // Road congestion overlay (2026-09-08, Ross's find: ACT's public
+  // Road congestion overlay (2026-09-08, MercurySwitch's find: ACT's public
   // Addinsight Bluetooth-detector traffic API - real per-road-segment
   // speed/delay/congestion, refreshed roughly every 1-5 minutes). Same
   // split as the population overlay: static road geometry loaded once,
@@ -518,7 +518,7 @@ export function CesiumView() {
   const [congestionLoading, setCongestionLoading] = useState(false);
   const congestionEntitiesRef = useRef<Entity[]>([]);
   // Every route_id that exists in the static schedule, live or not
-  // (2026-09-09, Ross's ask: "routes split to active and non active, still
+  // (2026-09-09, MercurySwitch's ask: "routes split to active and non active, still
   // shown but greyed out") - see allRouteRows below for where this is
   // merged with live counts. Fetched at startup, same as
   // population/traffic above, even though stop-arrivals.json is the
@@ -544,7 +544,7 @@ export function CesiumView() {
   // little, reads as more prominent), while genuinely zero-count cells
   // stay exactly at zero regardless (0 raised to any power is still 0) -
   // so "no traffic at all" stays visually distinct even at high boost.
-  // 2026-09-07 (Ross): after the percentile fix, the map was too binary -
+  // 2026-09-07 (MercurySwitch): after the percentile fix, the map was too binary -
   // pale blue or dark red with barely any transition - so this needed to
   // let more of the low/mid range show up as warm, not be compressed
   // further toward cold as the original (inverse) exponent direction did.
@@ -555,7 +555,7 @@ export function CesiumView() {
   // already near-maximum red. Since only road/route cells ever have
   // nonzero traffic at all, the whole map degenerated into "red exactly on
   // roads, nothing off them" - no real gradient left between a lightly-
-  // used stretch and a genuinely busy one (Ross: "traces of red only
+  // used stretch and a genuinely busy one (MercurySwitch: "traces of red only
   // around arterial roads"). "Halfway on the slider" isn't halfway in
   // perceived effect on this curve - confirmed numerically before picking
   // 4 instead: raw 0.1 -> 0.1 at s=1, 0.56 at s=4, 0.91 at s=25 - 4 still
@@ -573,7 +573,7 @@ export function CesiumView() {
   // data ingested since the pipeline change (see PROJECT_STATUS.md).
   const [showOnTime, setShowOnTime] = useState(false);
   const [onTimeEntries, setOnTimeEntries] = useState<OnTimeEntry[]>([]);
-  // Summary stat (2026-09-07, Ross's ask) - a single stopped vehicle's
+  // Summary stat (2026-09-07, MercurySwitch's ask) - a single stopped vehicle's
   // punctuality isn't network-level information; the median plus the
   // min/max range across every currently-matched vehicle is. Median rather
   // than mean since a handful of very early/very late outliers shouldn't
@@ -590,7 +590,7 @@ export function CesiumView() {
     const earlyCount = sorted.filter((d) => d <= -2).length;
     return { median, min: sorted[0], max: sorted[sorted.length - 1], n: sorted.length, onTimeCount, lateCount, earlyCount };
   }, [onTimeEntries]);
-  // On-time gauge/histogram pop-out (2026-09-08, Ross's ask - auto-shown
+  // On-time gauge/histogram pop-out (2026-09-08, MercurySwitch's ask - auto-shown
   // alongside the network median as of the same day, not gated behind a
   // separate button anymore) - a separate panel, doesn't touch the
   // existing on-time block above at all. Only a *this-session* trend, not
@@ -619,7 +619,7 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
 
-  // Right-side headline + ranked breakdown for Routes (2026-09-08, Ross's
+  // Right-side headline + ranked breakdown for Routes (2026-09-08, MercurySwitch's
   // ask - every panel gets an overall figure plus granular details, same
   // pattern as congestion/equity/heat map). The existing left-side picker
   // is untouched - it's a functional control (pick one route to filter
@@ -636,7 +636,7 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
 
-  // Live data stream bubble (2026-09-28, Ross's ask: "nice to see the data
+  // Live data stream bubble (2026-09-28, MercurySwitch's ask: "nice to see the data
   // coming in") - the most recently-updated vehicles, most recent first.
   // Genuinely reads busDataRef's own ts per vehicle rather than "just
   // fetched this poll", since the underlying feed lands on its own 5-minute
@@ -656,7 +656,7 @@ export function CesiumView() {
     return `${Math.round(sec / 60)}m ago`;
   }
 
-  // Full route list, live counts merged in (2026-09-09, Ross's ask: "routes
+  // Full route list, live counts merged in (2026-09-09, MercurySwitch's ask: "routes
   // split to active and non active, still shown but greyed out") - routeCounts
   // above only ever knew about routes with a vehicle on them right now; this
   // adds every route that exists in the static schedule at all, with count 0
@@ -727,7 +727,7 @@ export function CesiumView() {
   // binned to the same grid, as a synthetic zero-count cell wherever the
   // live-ping query didn't already cover it - this is what lets the map
   // show "there's a stop here but barely anything actually stops" as a
-  // distinct cold cell, rather than that area just being blank (Ross's ask,
+  // distinct cold cell, rather than that area just being blank (MercurySwitch's ask,
   // 2026-09-05: "areas that are underutilised or not close to a bus stop").
   // A location with no rectangle at all still means something too: no stop
   // and no observed activity either.
@@ -837,7 +837,7 @@ export function CesiumView() {
   }
 
   // Shared by the polygon-rendering effect below and the ranked list panel
-  // (2026-09-08, Ross's ask: "a list of the areas... densely populated,
+  // (2026-09-08, MercurySwitch's ask: "a list of the areas... densely populated,
   // underserved, and vice versa") - computed once, not duplicated. gap is
   // the percentile-rank difference (-1..1): positive means "more densely
   // populated than average, relative to how little service reaches it".
@@ -862,7 +862,7 @@ export function CesiumView() {
   }, [populationCells, heatmapCells]);
 
   // Top/bottom of the same ranking, for the right-hand list panel
-  // (2026-09-08, Ross's ask). Ties (several SA1s in the same suburb with
+  // (2026-09-08, MercurySwitch's ask). Ties (several SA1s in the same suburb with
   // an identical gap, e.g. all-zero-service areas) aren't specially
   // broken - stable sort keeps them in a consistent order.
   const EQUITY_LIST_SIZE = 8;
@@ -875,7 +875,7 @@ export function CesiumView() {
     };
   }, [equityRanking]);
 
-  // Headline figure (2026-09-08, Ross's ask - every panel leads with an
+  // Headline figure (2026-09-08, MercurySwitch's ask - every panel leads with an
   // overall number). "Underserved" here means a positive gap at all, not
   // just the worst few in the list below - a genuine network-wide count.
   const equityHeadline = useMemo(() => {
@@ -901,7 +901,7 @@ export function CesiumView() {
   // other would be numerically meaningless), but a genuine percentile-rank
   // gap: red means "more densely populated than average, relative to how
   // little service reaches it" - the literal "overpopulated but
-  // underutilised" framing Ross asked for (2026-09-08). Reuses heatColor
+  // underutilised" framing MercurySwitch asked for (2026-09-08). Reuses heatColor
   // for visual consistency with the heat map itself.
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -913,7 +913,7 @@ export function CesiumView() {
     // moment population data loaded - which now happens unconditionally at
     // startup to feed the permanent "Underserved areas" counter - regardless
     // of whether Availability was ever opened. Confirmed directly (2026-09-
-    // 28, Ross): this is the "heat map" that confusingly renders on first
+    // 28, MercurySwitch): this is the "heat map" that confusingly renders on first
     // load with nothing selected.
     if (!showEquity || equityRanking.length === 0) return;
 
@@ -936,7 +936,7 @@ export function CesiumView() {
     };
   }, [showEquity, equityRanking]);
 
-  // Yellow -> orange -> red, deliberately no green (2026-09-08, Ross:
+  // Yellow -> orange -> red, deliberately no green (2026-09-08, MercurySwitch:
   // "it needs to be all yellow/orange/red scale... showing a little too
   // much green"). Real data confirmed the reason: 719 of 725 links sit at
   // score 0 right now (free-flowing is the overwhelmingly common case,
@@ -981,7 +981,7 @@ export function CesiumView() {
   }, [trafficLinks, linkStats]);
 
   // Scale color against what's actually happening right now, not the
-  // theoretical 0-7 range (2026-09-08, Ross: "the worst parts are severe,
+  // theoretical 0-7 range (2026-09-08, MercurySwitch: "the worst parts are severe,
   // whereas free-flowing is probably... a zero or a one... adjust the
   // threshold"). Same lesson as the heat map's own percentile fix: real
   // traffic almost never uses the full range in either direction - free-
@@ -1013,7 +1013,7 @@ export function CesiumView() {
     };
   }, [congestionRanking]);
 
-  // Headline figure (2026-09-08, Ross's ask - every panel leads with an
+  // Headline figure (2026-09-08, MercurySwitch's ask - every panel leads with an
   // overall number). "Congested" here means score >= 2 (link_scores.json's
   // own lowest defined threshold), not just >0 - score 1 is still
   // essentially normal traffic noise.
@@ -1030,7 +1030,7 @@ export function CesiumView() {
     };
   }, [congestionRanking, congestionLists.closed.length, congestionLists.mostCongested]);
 
-  // "Use the congestion to measure latency of busses" (2026-09-08, Ross's
+  // "Use the congestion to measure latency of busses" (2026-09-08, MercurySwitch's
   // ask) - the actual correlation: for each currently-late/early/on-time
   // vehicle, find the nearest road segment with a live reading and show
   // its congestion score alongside the punctuality figure. Nearest-vertex
@@ -1108,23 +1108,23 @@ export function CesiumView() {
   // *current* dataset (not a fixed absolute scale - with only ~2 weeks of
   // history so far, an absolute scale would need constant recalibration as
   // more data lands). `heatmapSensitivity` (a user-adjustable slider,
-  // 2026-09-05 - Ross's ask, replacing a fixed linear scale that made
+  // 2026-09-05 - MercurySwitch's ask, replacing a fixed linear scale that made
   // moderate cells look misleadingly "hot") is an exponent applied to the
   // 0-1 relative intensity before mapping to color: >1 compresses low/mid
   // values toward cold and reserves red for only the genuinely highest
-  // cells ("ultra-high" per Ross), 1 is the original linear behaviour.
+  // cells ("ultra-high" per MercurySwitch), 1 is the original linear behaviour.
   //
   // 2026-09-07 fix: scaling against the single busiest cell (the original
   // approach) breaks badly once ~2500 zero/low-traffic stop cells are
   // unioned in alongside a handful of genuinely mega-busy interchange
   // cells - that's an extremely skewed (long-tail) distribution, and a
   // linear-or-power ratio against the one absolute max crushes nearly
-  // everything toward one end (Ross: "either red or blue, often all
+  // everything toward one end (MercurySwitch: "either red or blue, often all
   // blue"), since almost every real cell sits far below that one outlier.
   // Scaling against the 90th percentile of *non-zero* cells instead (any
   // cell at/above that point just reads as fully hot) keeps one freak busy
   // stop from flattening the whole map's dynamic range.
-  // Darker red top end (was #D32F2F) per Ross's ask 2026-09-07 for a more
+  // Darker red top end (was #D32F2F) per MercurySwitch's ask 2026-09-07 for a more
   // dramatic hot end once cells actually reach it.
   function heatColor(intensity: number): Color {
     if (intensity <= 0.5) {
@@ -1180,7 +1180,7 @@ export function CesiumView() {
     };
   }, [showHeatmap, heatmapCells, heatmapSensitivity]);
 
-  // Ranked heat map list (2026-09-08, Ross's ask: "a list of most
+  // Ranked heat map list (2026-09-08, MercurySwitch's ask: "a list of most
   // underutilised or utilised areas") - top/bottom cells by ping count.
   // "Underutilised" only means something for a cell that actually has a
   // stop nearby (see the heat map's own legend: blank ≠ blue) - the union
@@ -1197,7 +1197,7 @@ export function CesiumView() {
     };
   }, [heatmapCells]);
 
-  // Headline figure for the ranked list panel (2026-09-08, Ross's ask:
+  // Headline figure for the ranked list panel (2026-09-08, MercurySwitch's ask:
   // every panel should lead with an overall number, matching the on-time
   // panel's own network-median header, before the granular list below).
   const heatHeadline = useMemo(() => {
@@ -1274,7 +1274,7 @@ export function CesiumView() {
     // pollTick is the actual trigger for recomputing this each poll.
   }, [pollTick]);
 
-  // Draw the actual route line(s) as a visible overlay (2026-09-05, Ross's
+  // Draw the actual route line(s) as a visible overlay (2026-09-05, MercurySwitch's
   // ask) - a direct visual answer to "are vehicles actually locked to their
   // route", using the exact same shape data already used for map-matching,
   // not a separate/approximate line. Three triggers: selecting a single
@@ -1282,7 +1282,7 @@ export function CesiumView() {
   // from the Routes navigator draws every distinct shape currently in use
   // by that route's active vehicles (a route_id can have more than one -
   // different directions are different shapes); opening the Routes
-  // navigator *without* picking one yet (2026-09-08, Ross's ask: "show all
+  // navigator *without* picking one yet (2026-09-08, MercurySwitch's ask: "show all
   // routes overlaid on the map so... you can select it there also, rather
   // than just the drop-down list") draws every distinct shape any active
   // vehicle is currently on, each one clickable - see the `routeline:`-
@@ -1387,13 +1387,13 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [filterType, pollTick]);
 
-  // Route-first grouping for the Bus/Rail tab (2026-09-09, Ross's ask:
+  // Route-first grouping for the Bus/Rail tab (2026-09-09, MercurySwitch's ask:
   // "make the route the first col, and have the bus ID's captured nested
   // under the route") - was a flat list sorted by vehicle ID with route as
   // a secondary, right-aligned detail. Route order is by count (busiest
   // route first) since that's usually more useful to scan than alphabetical;
   // vehicle IDs within a route stay alphabetical.
-  // Direction per trip (2026-09-09, Ross's ask: nest by direction too, not
+  // Direction per trip (2026-09-09, MercurySwitch's ask: nest by direction too, not
   // just route) - shapeId is the reliable "same route, same direction"
   // signal already trusted for bunching (a route_id can have more than one
   // physical pattern per direction, but two trips sharing a shape_id are
@@ -1429,7 +1429,7 @@ export function CesiumView() {
     };
   }, [filteredList, tripDirections]);
 
-  // Foldout state (2026-09-09, Ross's ask: "a foldout rather than auto
+  // Foldout state (2026-09-09, MercurySwitch's ask: "a foldout rather than auto
   // displayed... showing Route 5 (6 busses)") - collapsed by default,
   // toggled per route.
   const [expandedRoutes, setExpandedRoutes] = useState<Set<string>>(new Set());
@@ -1507,7 +1507,7 @@ export function CesiumView() {
   // A live vehicle actually on the route, within this radius of the stop, is
   // a far better "next bus" signal than the static timetable - no ETA/shape
   // math needed: a physical stop only serves one direction, so any live
-  // vehicle on that exact route_id nearby is (per Ross, 2026-09-05) reliably
+  // vehicle on that exact route_id nearby is (per MercurySwitch, 2026-09-05) reliably
   // the one approaching THIS stop, not some other direction's service.
   const NEAR_BUS_RADIUS_METERS = 3000;
   const liveRouteProximity = useMemo(() => {
@@ -1532,7 +1532,7 @@ export function CesiumView() {
     // ref; pollTick is the actual trigger for recomputing this each poll.
   }, [nearestStops, pollTick]);
 
-  // "NextBus" side panel (2026-09-05, Ross's ask): clicking a stop opens a
+  // "NextBus" side panel (2026-09-05, MercurySwitch's ask): clicking a stop opens a
   // dedicated panel next to the stop list showing, per route serving that
   // stop, the single nearest live vehicle on that exact route_id - no
   // distance cap this time (unlike liveRouteProximity above, which only
@@ -1545,7 +1545,7 @@ export function CesiumView() {
   const [nextBusRows, setNextBusRows] = useState<NextBusRow[]>([]);
   const TERMINUS_THRESHOLD_METERS = 300;
   // A vehicle already past the stop along its own route isn't "next" for
-  // that stop, no matter how physically close it now is (2026-09-07, Ross:
+  // that stop, no matter how physically close it now is (2026-09-07, MercurySwitch:
   // "showing the bus that has passed and is continuing on its route" - it
   // was picking nearest by straight-line distance alone, with no concept
   // of before/after). A small tolerance absorbs snapping noise right at
@@ -1567,7 +1567,7 @@ export function CesiumView() {
         // measured on the specific shape a given candidate is actually on.
         //
         // route_id alone isn't enough to pick candidates, though (2026-09-07,
-        // Ross: opposite-side stops on the same route both showed the same
+        // MercurySwitch: opposite-side stops on the same route both showed the same
         // direction - e.g. Madigan St opp Hackett Shops showing "to Dickson"
         // when it should show "to National Museum"). A route can run both
         // directions, and a candidate merely being geometrically close to
@@ -1620,12 +1620,12 @@ export function CesiumView() {
     // pollTick is the actual trigger for recomputing this each poll.
   }, [nextBusStopId, nearestStops, pollTick]);
 
-  // "Near me for this bus" (2026-09-08, Ross): selecting a vehicle while
+  // "Near me for this bus" (2026-09-08, MercurySwitch): selecting a vehicle while
   // Near Me is active re-anchors the same panel to that bus's own upcoming
   // stops, instead of stops nearest your own location - "if I've clicked
   // near me, and then clicked on a bus... update the near me pane to show
   // the newly selected bus and route as opposed to the nearest to me."
-  // Deliberately doesn't touch the vehicle info bar at the bottom (Ross:
+  // Deliberately doesn't touch the vehicle info bar at the bottom (MercurySwitch:
   // "don't change the vehicle bar") - this only affects the Near Me panel
   // itself, and only while Near Me is on; selecting a vehicle with Near Me
   // off behaves exactly as before. "Ahead" is measured the same
@@ -1818,7 +1818,7 @@ export function CesiumView() {
           // huge implied velocity, and EXTRAPOLATE (see below) then draws a
           // straight line from that velocity for up to 5 minutes - visually
           // a vehicle flying far off both shapes before the next real fix
-          // corrects it. Root-caused 2026-09-05 (Ross: "trains showing 1km
+          // corrects it. Root-caused 2026-09-05 (MercurySwitch: "trains showing 1km
           // off route") - light rail hits this far more than buses since it
           // updates much less often, so there's more real-world distance
           // between "last sample of trip A" and "first sample of trip B".
@@ -1835,10 +1835,10 @@ export function CesiumView() {
           // Position is a CallbackPositionProperty, not a SampledPositionProperty.
           // Third rewrite of this same problem in one day (2026-09-08) -
           // EXTRAPOLATE flew off the route in a straight Cartesian line
-          // ("as the crow flies" - Ross, caught directly from a screenshot);
+          // ("as the crow flies" - MercurySwitch, caught directly from a screenshot);
           // switching to HOLD then froze the vehicle solid for most of each
           // ~8s poll gap, only snapping at the moment a new fix landed
-          // ("the movement has stopped completely" - Ross). Both are
+          // ("the movement has stopped completely" - MercurySwitch). Both are
           // symptoms of the same underlying mismatch: Cesium's own
           // extrapolation only knows straight-line Cartesian motion or no
           // motion at all - it has no way to keep moving *and* stay
@@ -1882,7 +1882,7 @@ export function CesiumView() {
 
           // Orientation from the shape's own tangent direction at the
           // vehicle's current (possibly coasting) position, not the feed's
-          // raw bearing held statically. Ross (2026-09-28): "should snap to
+          // raw bearing held statically. MercurySwitch (2026-09-28): "should snap to
           // the route" - once COAST_MAX_SECONDS let a vehicle coast for
           // minutes at a time (long enough to visibly round a real bend),
           // holding the last reported bearing meant the model kept facing
@@ -2121,8 +2121,8 @@ export function CesiumView() {
     { label: '>10', min: 10, max: Infinity, color: '#dc2626' },
   ];
 
-  // "Load live data" button (2026-09-08, Ross's ask) - one button, dual
-  // function (also Ross's explicit ask): starts ACTBusEventLoader
+  // "Load live data" button (2026-09-08, MercurySwitch's ask) - one button, dual
+  // function (also MercurySwitch's explicit ask): starts ACTBusEventLoader
   // (positions/routes/heat map/near-me) and ACTStopIdLoader (stop_id +
   // delay_minutes - on-time performance, the gauge/histogram panel, "at
   // stop" info) together, directly from the app. See fabricJobsService.ts
@@ -2143,7 +2143,7 @@ export function CesiumView() {
   }, []);
 
   // On-screen tilt control (2026-09-09) - a guaranteed-to-work alternative
-  // to Ctrl+drag, which Ross reported had stopped responding. Steps the
+  // to Ctrl+drag, which MercurySwitch reported had stopped responding. Steps the
   // camera's pitch in place (same position, same heading, just a shallower
   // or steeper look angle) rather than re-flying anywhere.
   function adjustTilt(deltaDeg: number) {
@@ -2276,7 +2276,7 @@ export function CesiumView() {
 
   return (
     <div className="relative h-screen w-full flex flex-col bg-slate-950 text-white font-sans overflow-hidden">
-      {/* Header (2026-09-09, Ross's ask: "build the entire permanent panel
+      {/* Header (2026-09-09, MercurySwitch's ask: "build the entire permanent panel
           as in the Helsinki style... make the map a pane within the dash").
           Fixed chrome, never scrolls away. */}
       <header className="flex items-center justify-between gap-3 px-4 py-2 border-b border-white/10 shrink-0">
@@ -2305,18 +2305,18 @@ export function CesiumView() {
         </div>
       </header>
 
-      {/* Permanent headline counter strip (2026-09-09, Ross's ask: "make the
+      {/* Permanent headline counter strip (2026-09-09, MercurySwitch's ask: "make the
           headline figures permanent counters") - always visible regardless
           of which tab is open, unlike the old per-tab-only headline cards
           still further down. Backing data (population/traffic/on-time) now
           fetches unconditionally at startup instead of lazily on tab-open -
           see the widened useEffects above - so these numbers are live from
           the first poll, not just placeholders until a tab is opened once.
-          Separate rounded tiles with gaps between them (2026-09-09, Ross's
+          Separate rounded tiles with gaps between them (2026-09-09, MercurySwitch's
           ask: "make the blocks separate and not joined") - was one
           continuous divide-x strip. */}
       <div className="flex items-stretch gap-2 px-3 py-2 border-b border-white/10 shrink-0 overflow-x-auto">
-        {/* Split into Bus/Light rail (2026-09-09, Ross's ask: "a tile for
+        {/* Split into Bus/Light rail (2026-09-09, MercurySwitch's ask: "a tile for
             Bus and Light rail... not both") - was one combined "Vehicles"
             card. No "available" (total fleet size) figure exists to pair
             with "active" here - GTFS doesn't model physical vehicles at
@@ -2327,7 +2327,7 @@ export function CesiumView() {
             count only - honestly labelled as that, not paired with a
             fabricated "available" figure. */}
         {/* Ordered to exactly match the left nav rail below (2026-09-28,
-            Ross's ask: "each of the selectors should be in sequence L-R and
+            MercurySwitch's ask: "each of the selectors should be in sequence L-R and
             up to down") - same activeTab()/selectTab() single source of
             truth already meant a click on one side always highlighted the
             other, but the two lists showing different orders made that
@@ -2499,7 +2499,7 @@ export function CesiumView() {
           </Link>
         </nav>
 
-        {/* Map pane (2026-09-09, Ross's ask: "make the map a pane within the
+        {/* Map pane (2026-09-09, MercurySwitch's ask: "make the map a pane within the
             dash") - bounded card, not full-bleed. Cesium's Viewer resizes to
             fill whatever container it's given, so this needed no change to
             the Cesium setup itself, only to the CSS around it. */}
@@ -2523,7 +2523,7 @@ export function CesiumView() {
           ⤡
         </button>
       </div>
-      {/* On-time gauge/histogram/trend bubble (2026-09-28, Ross's ask: "put
+      {/* On-time gauge/histogram/trend bubble (2026-09-28, MercurySwitch's ask: "put
           the gauges for the on time selection in a floating bubble like the
           live data stream, but only when that tab is selected") - moved out
           of the docked aside (which still shows the per-vehicle on-time
@@ -2623,7 +2623,7 @@ export function CesiumView() {
           </div>
         </div>
       )}
-      {/* Live data stream bubble (2026-09-28, Ross's ask) - always visible,
+      {/* Live data stream bubble (2026-09-28, MercurySwitch's ask) - always visible,
           not gated behind any tab, since the point is reassurance that data
           is genuinely arriving regardless of what else is on screen.
           Positioned above the tilt control rather than sharing its corner. */}
@@ -2722,7 +2722,7 @@ export function CesiumView() {
           </div>
         </div>
       )}
-      {/* Ranked heat map list (2026-09-08, Ross's ask) - right side so it
+      {/* Ranked heat map list (2026-09-08, MercurySwitch's ask) - right side so it
           doesn't collide with the legend on the left. */}
       {showHeatmap && (heatRanking.top.length > 0 || heatRanking.bottom.length > 0) && (
         <div className="text-xs">
@@ -2807,7 +2807,7 @@ export function CesiumView() {
           </div>
         </div>
       )}
-      {/* Ranked equity list (2026-09-08, Ross's ask: "a list of the areas...
+      {/* Ranked equity list (2026-09-08, MercurySwitch's ask: "a list of the areas...
           densely populated, underserved, and vice versa"). Right side, same
           reasoning as the heat map list above. */}
       {showEquity && (equityLists.underserved.length > 0 || equityLists.wellServed.length > 0) && (
@@ -2892,7 +2892,7 @@ export function CesiumView() {
           </div>
         </div>
       )}
-      {/* Ranked congestion list (2026-09-08, Ross's find: ACT's public
+      {/* Ranked congestion list (2026-09-08, MercurySwitch's find: ACT's public
           Bluetooth-detector traffic API) - same right-side list pattern as
           heat map/equity. Named segments read far better than link IDs. */}
       {showCongestion && (congestionLists.mostCongested.length > 0 || congestionLists.closed.length > 0) && (
@@ -3130,7 +3130,7 @@ export function CesiumView() {
       {/* "NextBus" panel - opens next to the stop list when a stop is
           clicked. Silently absent whenever nextBusRows is empty (no live
           vehicle on any route serving that stop) rather than showing an
-          empty/placeholder panel - per Ross's "if there is none on route do
+          empty/placeholder panel - per MercurySwitch's "if there is none on route do
           nothing" instruction. */}
       {nearMeActive && nextBusStopId && nextBusRows.length > 0 && (
         <div className="text-sm border-t border-white/10">
@@ -3180,7 +3180,7 @@ export function CesiumView() {
               const expanded = expandedRoutes.has(routeId);
               return (
                 <div key={routeId}>
-                  {/* Foldout header (2026-09-09, Ross's ask: "a foldout
+                  {/* Foldout header (2026-09-09, MercurySwitch's ask: "a foldout
                       rather than auto displayed... showing Route 5 (6
                       busses)") - collapsed by default, click to expand. */}
                   <button
@@ -3264,7 +3264,7 @@ export function CesiumView() {
         </div>
       )}
       {/* Right-side headline + ranked breakdown for Routes (2026-09-08,
-          Ross's ask) - the left panel above is the functional route picker,
+          MercurySwitch's ask) - the left panel above is the functional route picker,
           untouched; this is the informational "what's busiest" view every
           other layer now has. */}
       {showRoutesList && routeCounts.length > 0 && (
@@ -3287,7 +3287,7 @@ export function CesiumView() {
             </div>
           </div>
           {/* All routes, busiest first, inactive ones greyed out rather than
-              hidden (2026-09-09, Ross's ask: "routes split to active and non
+              hidden (2026-09-09, MercurySwitch's ask: "routes split to active and non
               active, still shown but greyed out") - allRouteRows merges the
               full static schedule's route list with live counts (0 for a
               route with nothing running right now). Still clickable even
@@ -3317,7 +3317,7 @@ export function CesiumView() {
           headway yet, see the comment on bunchingAlerts above. */}
       {showBunching && (
         <div className="text-sm">
-          {/* Headline (2026-09-08, Ross's ask - every panel leads with an
+          {/* Headline (2026-09-08, MercurySwitch's ask - every panel leads with an
               overall figure before the granular list). */}
           <div className="px-3 py-2 border-b border-white/10 sticky top-0 bg-slate-950/85">
             <div className="font-display text-[11px] uppercase tracking-wide text-white/40">Bunching alerts</div>
@@ -3439,7 +3439,7 @@ export function CesiumView() {
                     {entry.punctuality.label}
                   </span>
                 </div>
-                {/* Nearby road congestion (2026-09-08, Ross's ask: "use the
+                {/* Nearby road congestion (2026-09-08, MercurySwitch's ask: "use the
                     congestion to measure latency of busses") - only shown
                     when a road segment with a live reading is actually
                     close by (see CONGESTION_NEARBY_RADIUS_METERS), so a

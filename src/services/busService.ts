@@ -130,7 +130,7 @@ const HEATMAP_WINDOW = '1d';
 /**
  * Exported so the renderer draws cells the exact size the query actually
  * binned. 0.0009 deg is ~80-100m at Canberra's latitude (was 0.0025,
- * ~230-280m; before that 0.005, ~450-560m) - Ross's ask 2026-09-08 for
+ * ~230-280m; before that 0.005, ~450-560m) - MercurySwitch's ask 2026-09-08 for
  * ~100m cells. Lat/lon degrees don't cover equal ground (a degree of
  * longitude shrinks with cos(latitude)), so cells are a touch narrower
  * east-west than north-south rather than perfectly square - the same

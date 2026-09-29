@@ -1,5 +1,5 @@
 /**
- * Historic trends (2026-09-11) - the "second act" of the demo Ross planned
+ * Historic trends (2026-09-11) - the "second act" of the demo MercurySwitch planned
  * during the historic-data-capture ideation session: the live app is the
  * anchor, this is what shows once there's real multi-day history sitting in
  * Kusto (ACTBusEventLoader/ACTStopIdLoader/ACTTrafficLoader now run on a

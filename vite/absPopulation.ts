@@ -6,7 +6,7 @@
  * Unlike the GTFS static data (which genuinely can change - timetables,
  * routes, stops), Census population is a 2021 figure that won't be
  * superseded until the 2026 Census results are released - years, not
- * days. Ross's ask (2026-09-08): don't re-hit ABS's live service on every
+ * days. MercurySwitch's ask (2026-09-08): don't re-hit ABS's live service on every
  * single build for a number that moves this slowly. Cached to
  * vite/cache/abs-sa1-population-act-2021.geojson, committed to the repo -
  * a build only ever fetches from ABS once, the first time this cache

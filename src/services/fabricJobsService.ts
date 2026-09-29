@@ -1,9 +1,9 @@
 /**
- * Trigger Fabric notebook runs directly from the app (2026-09-08, Ross's
+ * Trigger Fabric notebook runs directly from the app (2026-09-08, MercurySwitch's
  * ask) - so restarting the live feed after an idle stretch doesn't need a
  * separate Fabric portal visit or a Claude Code session.
  *
- * One button, three functions (Ross's explicit ask for two; extended to a
+ * One button, three functions (MercurySwitch's explicit ask for two; extended to a
  * third the same day once it existed): starts ACTBusEventLoader
  * (positions/routes/heat map/near-me), ACTStopIdLoader (stop_id +
  * delay_minutes - on-time performance, the gauge/histogram panel, "at stop"
@@ -102,7 +102,7 @@ interface SingleTriggerOutcome {
 }
 
 /**
- * Starts one notebook's run, unless one is already in progress - Ross's own
+ * Starts one notebook's run, unless one is already in progress - MercurySwitch's own
  * session log records a real incident from two concurrent runs of
  * ACTBusEventLoader overlapping, so this checks first rather than risking
  * that again for the sake of one avoided click. Never throws - a failure
@@ -158,7 +158,7 @@ export async function triggerDataLoaders(): Promise<TriggerResult> {
     // One-time consent needed for this scope. Mark the intent so
     // resumePendingTriggerIfAny() (called once at app startup) finishes the
     // job automatically once the page reloads back from Entra, rather than
-    // making Ross click the button twice.
+    // making MercurySwitch click the button twice.
     sessionStorage.setItem(PENDING_TRIGGER_KEY, '1');
     const msal = await ensureMsalInitialized();
     await msal.acquireTokenRedirect({ scopes: [FABRIC_SCOPE] });

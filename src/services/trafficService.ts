@@ -1,5 +1,5 @@
 /**
- * ACT road congestion overlay (2026-09-08, Ross's find: the public
+ * ACT road congestion overlay (2026-09-08, MercurySwitch's find: the public
  * Addinsight Bluetooth-detector traffic API). Geometry is baked in at
  * build time (see vite/actTrafficLinks.ts - static/rarely-changing, same
  * pattern as GTFS shapes); live stats come from Kusto's TrafficLinkStats
