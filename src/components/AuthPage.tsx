@@ -70,6 +70,13 @@ export function AuthPage() {
             {error && (
               <p className="mt-3 text-center text-sm text-red-600">{error}</p>
             )}
+
+            <p className="mt-5 text-center text-xs text-gray-400">
+              For real-time access to this application, contact{' '}
+              <a href="mailto:admin@garrettconsulting.com.au" className="text-blue-600 hover:underline">
+                admin@garrettconsulting.com.au
+              </a>
+            </p>
           </div>
         </div>
       </div>
